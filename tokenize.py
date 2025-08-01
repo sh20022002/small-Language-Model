@@ -1,6 +1,7 @@
 """
-tokenize.py  –  minimal, fast prototype
-------------------------------------------------
+tokenize.py    minimal, fast prototype
+
+
 • build_db(text | files)      → populate length/frequency DB
 • freeze_vocab(k_bases, max_merges) → create base + merge tokens
 • encode(text)                → list[(id,count)]  (run-length compressed)
