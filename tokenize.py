@@ -305,12 +305,19 @@ def load(cls, file: str | Path, compress: bool | None = None):
 
 
 # ----------------------------------------------------------------------
-# if __name__ == "__main__":
-#     # Example usage
-#     tok = HybridTokenizer()
-# tok.add_text("אני אוהב פייתון וגם English")
-# tok.freeze_vocab(k_bases=5000, max_merges=10000)
+if __name__ == "__main__":
+    # Example usage
 
-# s = "מה קורה? hello שלום!"
-# print(tok.decode(tok.encode(s)))
-# # →  מה קורה? hello שלום!
+    corpus = """Anya loved the old bookstore. It was a haven of musty paper and the scent of forgotten stories. One afternoon, she found a peculiar book tucked away on a high shelf. It was leather-bound, its title barely visible under layers of dust. Intrigued, she bought it. Back home, she carefully opened the book. The pages were filled with intricate drawings of plants and animals, each labeled with elegant, unfamiliar script. As she traced the lines of a strange, luminous flower, the drawing seemed to shimmer. Then, the flower pulsed with light, and the scent of its petals filled the room. Anya realized the book wasn't just a collection of drawings; it was a portal. With each page, she stepped further into a world of vibrant flora and fantastical creatures, forever changed by the stories held within its pages"""
+    tok = HybridTokenizer()
+    for line in corpus.splitlines():
+        tok.add_text(line)
+    tok.db_status(preview=5, byte_limit=4, k_bases=50)
+    tok.freeze_vocab(k_bases=5000, max_merges=10000)
+
+    s = "helo     my name is shmuel and i am 23 yers old !"
+    print(s)
+    encoded = tok.encode(s)
+    print(encoded)
+    print(tok.decode(tok.encode(s)))
+# →  מה קורה? hello שלום!
