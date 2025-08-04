@@ -21,7 +21,7 @@ tok.freeze_vocab(k_bases=5000, max_merges=10000)
 
 
 <p align="center">
-  <img src="tokenizer\scrshots\Screenshot 2025-08-04 180616.png" alt="vocab_status" width="600">
+  <img src="scrshots\Screenshot 2025-08-04 180616.png" alt="vocab_status" width="600">
 </p>
 
 | Feature    | Description                                                 |
@@ -33,11 +33,11 @@ tok.freeze_vocab(k_bases=5000, max_merges=10000)
 | Robustness | Can encode *any* valid Unicode text, regardless of language |
 
 <p align="center">
-  <img src="tokenizer\scrshots\Screenshot 2025-08-04 180534.png" alt="code" width="600">
+  <img src="scrshots\Screenshot 2025-08-04 180534.png" alt="code" width="600">
 </p>
 <p align="center">
-  <img src="tokenizer\scrshots\Screenshot 2025-08-04 180548.png" alt="encoded" width="600">
+  <img src="scrshots\Screenshot 2025-08-04 180548.png" alt="encoded" width="600">
 </p>
 <p align="center">
-  <img src="tokenizer\scrshots\Screenshot 2025-08-04 180559.png" alt="decoded" width="600">
+  <img src="scrshots\Screenshot 2025-08-04 180559.png" alt="decoded" width="600">
 </p>
