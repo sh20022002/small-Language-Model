@@ -43,18 +43,18 @@ tok.db_status(preview=10)
 | Output     | RLE-compressed list of `(token_id, count)`                  |
 | Robustness | Can encode *any* valid Unicode text, regardless of language |
 
-### usage
-## encode
+## usage
+### encode
 <p align="center">
-  <img src="scrshots\Screenshot 2025-08-04 180534.png" alt="code" width="600">
+  <img src="scrshots\Screenshot 2025-08-04 180534.png" alt="code" width="800">
 </p>
 
-## encoded to tokens
+### encoded to tokens
 <p align="center">
-  <img src="scrshots\Screenshot 2025-08-04 180548.png" alt="encoded" width="600">
+  <img src="scrshots\Screenshot 2025-08-04 180548.png" alt="encoded" width="800">
 </p>
 
-## decoded back
+### decoded back
 <p align="center">
-  <img src="scrshots\Screenshot 2025-08-04 180559.png" alt="decoded" width="600">
+  <img src="scrshots\Screenshot 2025-08-04 180559.png" alt="decoded" width="800">
 </p>
