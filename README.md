@@ -13,10 +13,12 @@ This tokenizer combines classic subword tokenization with UTF-8 byte fallback. I
 
 ### ✅ Step 1: Build Token Frequency DB
 
-```python
+
 tok.add_text("Hello world, welcome to tokenization.")
 
 tok.freeze_vocab(k_bases=5000, max_merges=10000)
+
+
 
 <p align="center">
   <img src="tokenizer\scrshots\Screenshot 2025-08-04 180616.png" alt="vocab_status" width="600">
