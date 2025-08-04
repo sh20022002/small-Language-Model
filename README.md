@@ -10,25 +10,28 @@ This tokenizer combines classic subword tokenization with UTF-8 byte fallback. I
 ---
 ### init
 
+```python
 tok = HybridTokenizer()
-
+```
 ###  Build Token Frequency DB
 
-
+```python
 tok.add_text("Hello world, welcome to tokenization.")
-
+```
 or 
 
+```python
 tok.add_file(filename)
-
+```
 ### freeze the vocabelaery
-
+```python
 tok.freeze_vocab(k_bases=5000, max_merges=10000)
+```
 
 ### database report of the tokeized words
-
+```python
 tok.db_status(preview=10)
-
+```
 ### resoult of report
 
 <p align="center">
