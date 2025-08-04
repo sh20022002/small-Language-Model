@@ -35,7 +35,7 @@ tok.db_status(preview=10)
 ### resoult of report
 
 <p align="center">
-  <img src="scrshots\Screenshot 2025-08-04 180616.png" alt="vocab_status" width="600">
+  <img src="scrshots\Screenshot 2025-08-04 180616.png" alt="vocab_status" width="800">
 </p>
 
 | Feature    | Description                                                 |
