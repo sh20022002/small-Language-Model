@@ -19,7 +19,10 @@ from pathlib import Path
 from typing import List, Tuple
 import pickle, gzip, os
 
-
+# re patterns
+#  - WORD_RE:  matches words (letters/digits)
+#  - SPECIAL_RE: matches special characters (punctuation, emojis)
+#  - TOKEN_RE: matches tokens (words, whitespace, special characters)
 WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)      # letters/digits
 SPECIAL_RE = re.compile(r"[^\w\s]", re.UNICODE)  # punctuation etc.
 TOKEN_RE = re.compile(r"\n|\s+|\w+|[^\w\s]", re.UNICODE)
@@ -49,7 +52,7 @@ class HybridTokenizer:
         self.sp_id = self.token2id["<SP>"]
         self.nl_id = self.token2id["<NL>"]                   # assigns id
 
-    # public API 
+    # adds a text file words to the Token DB
     def add_file(self, filename: str|Path):
         with open(filename, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -59,6 +62,7 @@ class HybridTokenizer:
         # Lowercase Latin, leave RTL scripts untouched
         return tok.lower() if tok and "A" <= tok[0] <= "Z" else tok
 
+    # adds words from a text string to the Token DB
     def add_text(self, text: str):
         for w in WORD_RE.findall(text):
             self.word_db[self._norm(w)] += 1
@@ -108,24 +112,24 @@ class HybridTokenizer:
 
         # quick suggestion
         if base_ratio < 90:
-            print("\n⚠️  < 90 % of corpus occurrences fit base-token criterion.")
+            print("\n  < 90 % of corpus occurrences fit base-token criterion.")
             print("   Consider raising byte_limit or adding more data before freezing.")
         elif total_types < k_bases * 2:
-            print("\n⚠️  Very small DB – you may want a larger corpus before freezing.")
+            print("\n  Very small DB you may want a larger corpus before freezing.")
         else:
-            print("\n👍  Looks healthy – you can likely call freeze_vocab() anytime.")
+            print("\n  Looks healthy you can likely call freeze_vocab() anytime.")
 
     def freeze_vocab(self,
                      k_bases: int = 500,
                      max_merges: int = 10_000):
         """
-        • choose base tokens  (≤4-byte UTF-8) – top-k by freq
+        • choose base tokens  (≤4-byte UTF-8)  top-k by freq
         • build merge rules greedily by frequency
         """
         if self.frozen:
             return
         
-        #  1: choose base tokens
+        # choose base tokens
         bases = [w for w in self.word_db
          if len(w.encode()) <= BYTE_LIMIT]
         bases.sort(key=lambda w: (-self.word_db[w], len(w)))         # freq⟂len
@@ -134,7 +138,7 @@ class HybridTokenizer:
             self._add_token(w)
 
        
-        #  2: create merges from bases  (very light-weight BPE)
+        # create merges from bases  (very light-weight BPE)
         merge_counter: Counter = Counter()
         for word, freq in self.word_db.items():
             # skip if already base
@@ -181,6 +185,7 @@ class HybridTokenizer:
         opener = gzip.open if compress else open
         with opener(file, "wb") as fh:
             pickle.dump(state, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            
 
     def encode(self, text: str) -> List[Tuple[int,int]]:
         """
@@ -302,22 +307,3 @@ def load(cls, file: str | Path, compress: bool | None = None):
     obj.nl_id     = state["nl_id"]
     return obj
 
-
-
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    # Example usage
-
-    corpus = """Anya loved the old bookstore. It was a haven of musty paper and the scent of forgotten stories. One afternoon, she found a peculiar book tucked away on a high shelf. It was leather-bound, its title barely visible under layers of dust. Intrigued, she bought it. Back home, she carefully opened the book. The pages were filled with intricate drawings of plants and animals, each labeled with elegant, unfamiliar script. As she traced the lines of a strange, luminous flower, the drawing seemed to shimmer. Then, the flower pulsed with light, and the scent of its petals filled the room. Anya realized the book wasn't just a collection of drawings; it was a portal. With each page, she stepped further into a world of vibrant flora and fantastical creatures, forever changed by the stories held within its pages"""
-    tok = HybridTokenizer()
-    for line in corpus.splitlines():
-        tok.add_text(line)
-    tok.db_status(preview=5, byte_limit=4, k_bases=50)
-    tok.freeze_vocab(k_bases=5000, max_merges=10000)
-
-    s = "helo     my name is shmuel and i am 23 yers old !"
-    print(s)
-    encoded = tok.encode(s)
-    print(encoded)
-    print(tok.decode(tok.encode(s)))
-# →  מה קורה? hello שלום!
