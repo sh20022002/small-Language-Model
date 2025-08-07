@@ -121,7 +121,7 @@ class Transformer(nn.Module):
         x = self.norm(x)
         return self.to_logits(x)
 
-    def generate(self, x, max_new_tokens=50, eos_token_id=None):
+    def generate(self, x, max_new_tokens=50, eos_token_id='<EOS>'):
         # Autoregressive generation loop:
         # At each step, we feed the entire current token sequence to the model,
         # take the logits at the last position, sample or argmax the next token,

@@ -185,7 +185,33 @@ class HybridTokenizer:
         opener = gzip.open if compress else open
         with opener(file, "wb") as fh:
             pickle.dump(state, fh, protocol=pickle.HIGHEST_PROTOCOL)
-            
+    @classmethod
+    def load(cls, file: str | Path, compress: bool | None = None):
+        """
+        Restore a tokenizer saved with `save()`.
+
+        Args
+        ----
+        file       : path to the pickle (auto-detect .gz)
+        compress   : override auto-detection (True/False)
+        """
+        file = Path(file)
+        if compress is None:
+            compress = file.suffix.endswith(".gz")
+        opener = gzip.open if compress else open
+        with opener(file, "rb") as fh:
+            state = pickle.load(fh)
+
+        obj = cls(special_tokens=state["special_tokens"])
+        # overwrite internals
+        obj.word_db   = state["word_db"]
+        obj.token2id  = state["token2id"]
+        obj.id2token  = state["id2token"]
+        obj.merge_rules = state["merge_rules"]
+        obj.frozen    = state["frozen"]
+        obj.sp_id     = state["sp_id"]
+        obj.nl_id     = state["nl_id"]
+        return obj       
 
     def encode(self, text: str) -> List[Tuple[int,int]]:
         """
@@ -279,31 +305,5 @@ class HybridTokenizer:
     
 
 
-@classmethod
-def load(cls, file: str | Path, compress: bool | None = None):
-    """
-    Restore a tokenizer saved with `save()`.
 
-    Args
-    ----
-    file       : path to the pickle (auto-detect .gz)
-    compress   : override auto-detection (True/False)
-    """
-    file = Path(file)
-    if compress is None:
-        compress = file.suffix.endswith(".gz")
-    opener = gzip.open if compress else open
-    with opener(file, "rb") as fh:
-        state = pickle.load(fh)
-
-    obj = cls(special_tokens=state["special_tokens"])
-    # overwrite internals
-    obj.word_db   = state["word_db"]
-    obj.token2id  = state["token2id"]
-    obj.id2token  = state["id2token"]
-    obj.merge_rules = state["merge_rules"]
-    obj.frozen    = state["frozen"]
-    obj.sp_id     = state["sp_id"]
-    obj.nl_id     = state["nl_id"]
-    return obj
 
