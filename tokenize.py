@@ -33,7 +33,7 @@ class HybridTokenizer:
     def __init__(
         self,
         special_tokens: List[str] = (
-            "<PAD>", "<UNK>", "<CLS>", "<SEP>", "<MASK>",
+            "<PAD>", "<UNK>", "<CLS>", "<SEP>", "<MASK>","<EOS>"
             "<RES>",          # ← your old specials
             "<SP>", "<NL>"    # ← make sure these two are included
         )
