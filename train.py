@@ -10,76 +10,87 @@ import pandas as pd
 
 
 
-def train_model(model, train_loader, val_loader, optimizer, device, epochs=5):
+# ---- Training loop ----
+def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ignore_index=-100):
     model.to(device)
-    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index)
     train_losses, val_losses, val_accuracies = [], [], []
+
+    # helper: get the model's embedding if present (for safety checks)
+    emb = next((m for m in model.modules() if isinstance(m, nn.Embedding)), None)
 
     for epoch in range(epochs):
         model.train()
-        total_loss = 0
-        for batch in train_loader:
-            input_ids = batch['input_ids'].to(device)
-            
+        total_loss = 0.0
 
-            logits = model(input_ids)
-            loss = loss_fn(logits.view(-1, logits.size(-1)), input_ids.view(-1))
+        for batch in train_loader:
+            ids   = batch["input_ids"].to(device)          # [B, T]
+            attn  = batch["attention_mask"].to(device)     # [B, T]
+            labels= batch["labels"].to(device)             # [B, T] with -100 on pads
+
+            # ---- safety checks to avoid device-side asserts ----
+            if emb is not None:
+                mx = int(ids.max().item()); mn = int(ids.min().item())
+                assert mn >= 0, f"Found negative token id ({mn})"
+                assert mx < emb.num_embeddings, f"Token id {mx} >= embedding vocab {emb.num_embeddings}"
 
             optimizer.zero_grad()
+
+            # pass mask if your forward supports it
+            try:
+                logits = model(ids, attention_mask=attn)   # [B, T, V]
+            except TypeError:
+                logits = model(ids)
+
+            loss = loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
             loss.backward()
             optimizer.step()
 
-            total_loss += loss.item()
+            total_loss += float(loss)
 
         avg_train_loss = total_loss / len(train_loader)
         train_losses.append(avg_train_loss)
 
+        # ---- validation ----
         model.eval()
-        val_loss = 0
-        correct = 0
-        total = 0
+        val_loss, correct, total = 0.0, 0, 0
         with torch.no_grad():
             for batch in val_loader:
-                input_ids = batch['input_ids'].to(device)
-                
+                ids   = batch["input_ids"].to(device)
+                attn  = batch["attention_mask"].to(device)
+                labels= batch["labels"].to(device)
 
-                logits = model(input_ids)
-                loss = loss_fn(logits.view(-1, logits.size(-1)), input_ids.view(-1))
-                val_loss += loss.item()
+                try:
+                    logits = model(ids, attention_mask=attn)
+                except TypeError:
+                    logits = model(ids)
 
-                pred = torch.argmax(logits, dim=-1)
-                correct += (pred == input_ids).sum().item()
-                total += input_ids.numel()
+                loss = loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
+                val_loss += float(loss)
+
+                pred = logits.argmax(dim=-1)               # [B, T]
+                mask = labels != ignore_index              # ignore pads in accuracy
+                correct += (pred[mask] == labels[mask]).sum().item()
+                total   += mask.sum().item()
 
         avg_val_loss = val_loss / len(val_loader)
-        accuracy = correct / total * 100
+        accuracy = (correct / max(total, 1)) * 100.0
         val_losses.append(avg_val_loss)
         val_accuracies.append(accuracy)
 
-        print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Accuracy: {accuracy:.2f}%")
+        print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}, "
+              f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%")
 
-    # Plotting results
+    # plots + csv as you had
     plt.figure(figsize=(12,4))
-    plt.subplot(1,2,1)
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Val Loss')
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.subplot(1,2,2)
-    plt.plot(val_accuracies, label='Val Accuracy')
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy (%)")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    plt.subplot(1,2,1); plt.plot(train_losses, label='Train Loss'); plt.plot(val_losses, label='Val Loss')
+    plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend()
+    plt.subplot(1,2,2); plt.plot(val_accuracies, label='Val Accuracy')
+    plt.xlabel("Epoch"); plt.ylabel("Accuracy (%)"); plt.legend()
+    plt.tight_layout(); plt.show()
 
-    loss_vals = pd.DataFrame(list(zip(train_losses, val_losses)), columns=['train', 'val'])
-    loss_vals.to_csv('losses.csv')
-
+    pd.DataFrame({"train": train_losses, "val": val_losses}).to_csv("losses.csv", index=False)
     return model
-
-
 
 
 
@@ -94,31 +105,22 @@ class QADataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        text = f"Q: {item['question']}\\nA: {item['answer']}"
+        # adjust keys to your data: 'question'/'answer' or 'input'/'output'
+        q = item.get("question", item.get("input", ""))
+        a = item.get("answer",   item.get("output", ""))
+        text = f"Q: {q}\nA: {a}"
         tokens = self.tokenizer.encode(text)[:self.max_length]
         input_ids = torch.tensor(tokens, dtype=torch.long)
         return {"input_ids": input_ids}
 
-def collate_fn(batch, pad_id=0):
-    ids = [torch.tensor(x["input_ids"], dtype=torch.long) for x in batch]
-    am  = [torch.tensor(x["attention_mask"], dtype=torch.long) for x in batch]
-    # labels same as ids for LM
-    labs = [t.clone() for t in ids]
+def collate_fn(batch, pad_id=0, ignore_index=-100):
+    ids = [b["input_ids"] for b in batch]                    # each [T]
+    attn = [torch.ones_like(t, dtype=torch.long) for t in ids]  # 1s before pad
 
-    ids = torch.nn.utils.rnn.pad_sequence(ids, batch_first=True, padding_value=pad_id)
-    am  = torch.nn.utils.rnn.pad_sequence(am,  batch_first=True, padding_value=0)
-    labs = torch.nn.utils.rnn.pad_sequence(labs, batch_first=True, padding_value=-100)
+    ids  = torch.nn.utils.rnn.pad_sequence(ids,  batch_first=True, padding_value=pad_id)  # [B, T]
+    attn = torch.nn.utils.rnn.pad_sequence(attn, batch_first=True, padding_value=0)       # [B, T]
 
-    return {"input_ids": ids, "attention_mask": am, "labels": labs}
+    labels = ids.clone()
+    labels[attn == 0] = ignore_index  # ignore padding in the loss
 
-
-
-def load_train(data, tokenizer):
-    train_data, val_data = train_test_split(data, test_size=0.1, random_state=42)
-
-    train_dataset = QADataset(train_data, tokenizer)
-    val_dataset = QADataset(val_data, tokenizer)
-
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, collate_fn=collate_fn)
-    return train_loader, val_loader
+    return {"input_ids": ids, "attention_mask": attn, "labels": labels}
