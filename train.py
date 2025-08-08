@@ -6,6 +6,7 @@ import matplotlib as plt
 
 from torch.utils.data import DataLoader, Dataset
 from sklearn.model_selection import train_test_split
+import pandas as pd
 
 
 
@@ -72,6 +73,11 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5):
     plt.legend()
     plt.tight_layout()
     plt.show()
+
+    loss_vals = pd.DataFrame(list(zip(train_losses, val_losses)), columns=['train', 'val'])
+    loss_vals.to_csv('losses.csv')
+
+    return model
 
 
 
