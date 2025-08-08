@@ -12,7 +12,7 @@ import pandas as pd
 
 def train_model(model, train_loader, val_loader, optimizer, device, epochs=5):
     model.to(device)
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
     train_losses, val_losses, val_accuracies = [], [], []
 
     for epoch in range(epochs):
@@ -99,10 +99,18 @@ class QADataset(Dataset):
         input_ids = torch.tensor(tokens, dtype=torch.long)
         return {"input_ids": input_ids}
 
-def collate_fn(batch):
-    input_ids = [item["input_ids"] for item in batch]
-    padded = torch.nn.utils.rnn.pad_sequence(input_ids, batch_first=True, padding_value=0)
-    return {"input_ids": padded}
+def collate_fn(batch, pad_id=0):
+    ids = [torch.tensor(x["input_ids"], dtype=torch.long) for x in batch]
+    am  = [torch.tensor(x["attention_mask"], dtype=torch.long) for x in batch]
+    # labels same as ids for LM
+    labs = [t.clone() for t in ids]
+
+    ids = torch.nn.utils.rnn.pad_sequence(ids, batch_first=True, padding_value=pad_id)
+    am  = torch.nn.utils.rnn.pad_sequence(am,  batch_first=True, padding_value=0)
+    labs = torch.nn.utils.rnn.pad_sequence(labs, batch_first=True, padding_value=-100)
+
+    return {"input_ids": ids, "attention_mask": am, "labels": labs}
+
 
 
 def load_train(data, tokenizer):
