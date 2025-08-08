@@ -20,10 +20,10 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5):
         total_loss = 0
         for batch in train_loader:
             input_ids = batch['input_ids'].to(device)
-            labels = input_ids.clone()
+            
 
             logits = model(input_ids)
-            loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+            loss = loss_fn(logits.view(-1, logits.size(-1)), input_ids.view(-1))
 
             optimizer.zero_grad()
             loss.backward()
@@ -41,15 +41,15 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5):
         with torch.no_grad():
             for batch in val_loader:
                 input_ids = batch['input_ids'].to(device)
-                labels = input_ids.clone()
+                
 
                 logits = model(input_ids)
-                loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+                loss = loss_fn(logits.view(-1, logits.size(-1)), input_ids.view(-1))
                 val_loss += loss.item()
 
                 pred = torch.argmax(logits, dim=-1)
-                correct += (pred == labels).sum().item()
-                total += labels.numel()
+                correct += (pred == input_ids).sum().item()
+                total += input_ids.numel()
 
         avg_val_loss = val_loss / len(val_loader)
         accuracy = correct / total * 100
