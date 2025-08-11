@@ -10,13 +10,13 @@ import pandas as pd
 
 
 
-# ---- Training loop ----
 def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ignore_index=-100):
     model.to(device)
     loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index)
+
     train_losses, val_losses, val_accuracies = [], [], []
 
-    # helper: get the model's embedding if present (for safety checks)
+    # (optional) grab embedding to know vocab size
     emb = next((m for m in model.modules() if isinstance(m, nn.Embedding)), None)
 
     for epoch in range(epochs):
@@ -24,23 +24,28 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
         total_loss = 0.0
 
         for batch in train_loader:
-            ids   = batch["input_ids"].to(device)          # [B, T]
-            attn  = batch["attention_mask"].to(device)     # [B, T]
-            labels= batch["labels"].to(device)             # [B, T] with -100 on pads
+            ids    = batch["input_ids"].to(device)          # [B, T]
+            attn   = batch["attention_mask"].to(device)     # [B, T]
+            labels = batch["labels"].to(device)             # [B, T] with -100 on pads
 
-            # ---- safety checks to avoid device-side asserts ----
+           
             if emb is not None:
-                mx = int(ids.max().item()); mn = int(ids.min().item())
-                assert mn >= 0, f"Found negative token id ({mn})"
+                mx, mn = int(ids.max()), int(ids.min())
+                assert mn >= 0, f"Negative token id: {mn}"
                 assert mx < emb.num_embeddings, f"Token id {mx} >= embedding vocab {emb.num_embeddings}"
 
             optimizer.zero_grad()
 
-            # pass mask if your forward supports it
             try:
-                logits = model(ids, attention_mask=attn)   # [B, T, V]
+                logits = model(ids, attention_mask=attn)    # [B, T, V]
             except TypeError:
                 logits = model(ids)
+
+            # labels vs logits vocab check (excluding ignore_index)
+            if (labels != ignore_index).any():
+                V = logits.size(-1)
+                max_lab = int(labels[labels != ignore_index].max())
+                assert max_lab < V, f"Label {max_lab} >= logits classes {V}"
 
             loss = loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
             loss.backward()
@@ -48,17 +53,17 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
 
             total_loss += float(loss)
 
-        avg_train_loss = total_loss / len(train_loader)
+        avg_train_loss = total_loss / max(1, len(train_loader))
         train_losses.append(avg_train_loss)
 
-        # ---- validation ----
+        
         model.eval()
         val_loss, correct, total = 0.0, 0, 0
         with torch.no_grad():
             for batch in val_loader:
-                ids   = batch["input_ids"].to(device)
-                attn  = batch["attention_mask"].to(device)
-                labels= batch["labels"].to(device)
+                ids    = batch["input_ids"].to(device)
+                attn   = batch["attention_mask"].to(device)
+                labels = batch["labels"].to(device)
 
                 try:
                     logits = model(ids, attention_mask=attn)
@@ -73,7 +78,7 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
                 correct += (pred[mask] == labels[mask]).sum().item()
                 total   += mask.sum().item()
 
-        avg_val_loss = val_loss / len(val_loader)
+        avg_val_loss = val_loss / max(1, len(val_loader))
         accuracy = (correct / max(total, 1)) * 100.0
         val_losses.append(avg_val_loss)
         val_accuracies.append(accuracy)
