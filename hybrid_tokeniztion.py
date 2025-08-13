@@ -92,9 +92,7 @@ class HybridTokenizer:
             if p.is_file():
                 self.add_file(p)
 
-    # ----------------------------
-    # Status / inspection helpers
-    # ----------------------------
+   
     @staticmethod
     def _utf8_len(s: str) -> int:
         return len(s.encode("utf-8"))
