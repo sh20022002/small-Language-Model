@@ -120,10 +120,14 @@ class Transformer(nn.Module):
             x = self.token_emb(x)  # -> [B, T, C]
         assert x.dim() == 3, f"expected [B,T,C], got {tuple(x.shape)}"
 
-        B, T, C = x.shape
-        # ... keep your existing block/attention logic exactly as it was ...
-        # x = self.blocks(x) / self.norm / to_logits etc.
-        return self.to_logits(self.norm(self.blocks(x)))
+        #  Iterate over blocks instead of calling the ModuleList
+        for block in self.blocks:
+            # if your blocks don’t take a mask, just call block(x)
+            x = block(x)
+
+        x = self.norm(x)
+        return self.to_logits(x)
+
 
 
     def generate(self, x, max_new_tokens=50, eos_token_id='<EOS>'):
