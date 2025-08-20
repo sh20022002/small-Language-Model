@@ -50,12 +50,10 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
 
             loss = loss_fn(logits.reshape(B*T, V), labels.reshape(B*T))
 
-
-            loss = loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
             loss.backward()
             optimizer.step()
 
-            total_loss += float(loss)
+            total_loss += loss.detach().item()
 
         avg_train_loss = total_loss / max(1, len(train_loader))
         train_losses.append(avg_train_loss)
@@ -74,8 +72,13 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
                 except TypeError:
                     logits = model(ids)
 
-                loss = loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
-                val_loss += float(loss)
+                # logits: [B, T, V], labels: [B, T]
+                assert logits.dim() == 3, f"logits shape {tuple(logits.shape)}"
+                B, T, V = logits.shape
+                assert labels.shape == (B, T), f"labels {tuple(labels.shape)} vs logits {(B, T, V)}"
+
+                loss = loss_fn(logits.reshape(B*T, V), labels.reshape(B*T))
+                val_loss += loss.detach().item()
 
                 pred = logits.argmax(dim=-1)               # [B, T]
                 mask = labels != ignore_index              # ignore pads in accuracy
