@@ -114,12 +114,17 @@ class Transformer(nn.Module):
         self.norm = RMSNorm(dim)
         self.to_logits = nn.Linear(dim, vocab_size, bias=False)
 
-    def forward(self, x):
-        x = self.token_emb(x)
-        for blk in self.blocks:
-            x = blk(x)
-        x = self.norm(x)
-        return self.to_logits(x)
+    def forward(self, x, attention_mask=None):
+        # If x are token IDs [B, T], embed them; if already embeddings [B, T, C], keep as is
+        if x.dim() == 2 and x.dtype in (torch.long, torch.int64):
+            x = self.token_emb(x)  # -> [B, T, C]
+        assert x.dim() == 3, f"expected [B,T,C], got {tuple(x.shape)}"
+
+        B, T, C = x.shape
+        # ... keep your existing block/attention logic exactly as it was ...
+        # x = self.blocks(x) / self.norm / to_logits etc.
+        return self.to_logits(self.norm(self.blocks(x)))
+
 
     def generate(self, x, max_new_tokens=50, eos_token_id='<EOS>'):
         # Autoregressive generation loop:
