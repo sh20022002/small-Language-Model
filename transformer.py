@@ -141,25 +141,27 @@ class Transformer(nn.Module):
         return x
 
     def resize_token_embeddings(self, new_size: int):
-        """Grow/shrink token embedding + tied output head to `new_size`."""
+        """Resize token embedding + output head to match `new_size`."""
         old_emb = self.token_emb
+        old_out = self.to_logits
         old_n, dim = old_emb.num_embeddings, old_emb.embedding_dim
         if new_size == old_n:
             return
 
-        # new embedding
+        # --- embedding ---
         new_emb = nn.Embedding(new_size, dim)
-        # copy what we can
         num_copy = min(old_n, new_size)
         with torch.no_grad():
-            new_emb.weight[:num_copy] = old_emb.weight[:num_copy]
+            new_emb.weight[:num_copy].copy_(old_emb.weight[:num_copy])
             if new_size > old_n:
-                # init any new rows
-                new_emb.weight[num_copy:].normal_(mean=0.0, std=(dim ** -0.5))
-
+                nn.init.normal_(new_emb.weight[num_copy:], mean=0.0, std=(dim ** -0.5))
         self.token_emb = new_emb
 
-        # re-create tied output head with the new size and re-tie
-        new_head = nn.Linear(dim, new_size, bias=False)
-        new_head.weight = self.token_emb.weight  # tie weights
-        self.to_logits = new_head
+        # --- output head (not weight-tied in your code) ---
+        new_out = nn.Linear(dim, new_size, bias=False)
+        with torch.no_grad():
+            new_out.weight[:num_copy].copy_(old_out.weight[:num_copy])
+            if new_size > old_n:
+                nn.init.normal_(new_out.weight[num_copy:], mean=0.0, std=(dim ** -0.5))
+        self.to_logits = new_out
+
