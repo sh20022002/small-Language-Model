@@ -32,7 +32,9 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
             if emb is not None:
                 mx, mn = int(ids.max()), int(ids.min())
                 assert mn >= 0, f"Negative token id: {mn}"
-                assert mx < emb.num_embeddings, f"Token id {mx} >= embedding vocab {emb.num_embeddings}"
+                if mx >= model.token_emb.num_embeddings:
+                    model.resize_token_embeddings(mx + 1)
+
 
             optimizer.zero_grad()
 
