@@ -139,3 +139,27 @@ class Transformer(nn.Module):
             if eos_token_id is not None and (next_token == eos_token_id).all():
                 break
         return x
+
+    def resize_token_embeddings(self, new_size: int):
+        """Grow/shrink token embedding + tied output head to `new_size`."""
+        old_emb = self.token_emb
+        old_n, dim = old_emb.num_embeddings, old_emb.embedding_dim
+        if new_size == old_n:
+            return
+
+        # new embedding
+        new_emb = nn.Embedding(new_size, dim)
+        # copy what we can
+        num_copy = min(old_n, new_size)
+        with torch.no_grad():
+            new_emb.weight[:num_copy] = old_emb.weight[:num_copy]
+            if new_size > old_n:
+                # init any new rows
+                new_emb.weight[num_copy:].normal_(mean=0.0, std=(dim ** -0.5))
+
+        self.token_emb = new_emb
+
+        # re-create tied output head with the new size and re-tie
+        new_head = nn.Linear(dim, new_size, bias=False)
+        new_head.weight = self.token_emb.weight  # tie weights
+        self.to_logits = new_head
