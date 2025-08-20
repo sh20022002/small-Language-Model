@@ -141,30 +141,30 @@ class Transformer(nn.Module):
         return x
 
     # in transformer.py, inside Transformer
-def resize_token_embeddings(self, new_size: int):
-    old_emb = self.token_emb
-    old_out = self.to_logits
-    old_n, dim = old_emb.num_embeddings, old_emb.embedding_dim
+    def resize_token_embeddings(self, new_size: int):
+        old_emb = self.token_emb
+        old_out = self.to_logits
+        old_n, dim = old_emb.num_embeddings, old_emb.embedding_dim
 
-    if new_size == old_n:
-        return
+        if new_size == old_n:
+            return
 
-    device = old_emb.weight.device
-    dtype  = old_emb.weight.dtype
+        device = old_emb.weight.device
+        dtype  = old_emb.weight.dtype
 
-    # --- embedding ---
-    new_emb = nn.Embedding(new_size, dim, device=device, dtype=dtype)
-    num_copy = min(old_n, new_size)
-    with torch.no_grad():
-        new_emb.weight[:num_copy].copy_(old_emb.weight[:num_copy])
-        if new_size > old_n:
-            nn.init.normal_(new_emb.weight[num_copy:], mean=0.0, std=(dim ** -0.5))
-    self.token_emb = new_emb
+        # --- embedding ---
+        new_emb = nn.Embedding(new_size, dim, device=device, dtype=dtype)
+        num_copy = min(old_n, new_size)
+        with torch.no_grad():
+            new_emb.weight[:num_copy].copy_(old_emb.weight[:num_copy])
+            if new_size > old_n:
+                nn.init.normal_(new_emb.weight[num_copy:], mean=0.0, std=(dim ** -0.5))
+        self.token_emb = new_emb
 
-    # --- output head ---
-    new_out = nn.Linear(dim, new_size, bias=False, device=device, dtype=dtype)
-    with torch.no_grad():
-        new_out.weight[:num_copy].copy_(old_out.weight[:num_copy])
-        if new_size > old_n:
-            nn.init.normal_(new_out.weight[num_copy:], mean=0.0, std=(dim ** -0.5))
-    self.to_logits = new_out
+        # --- output head ---
+        new_out = nn.Linear(dim, new_size, bias=False, device=device, dtype=dtype)
+        with torch.no_grad():
+            new_out.weight[:num_copy].copy_(old_out.weight[:num_copy])
+            if new_size > old_n:
+                nn.init.normal_(new_out.weight[num_copy:], mean=0.0, std=(dim ** -0.5))
+        self.to_logits = new_out
