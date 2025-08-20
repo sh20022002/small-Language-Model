@@ -43,11 +43,13 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
             except TypeError:
                 logits = model(ids)
 
-            # labels vs logits vocab check (excluding ignore_index)
-            if (labels != ignore_index).any():
-                V = logits.size(-1)
-                max_lab = int(labels[labels != ignore_index].max())
-                assert max_lab < V, f"Label {max_lab} >= logits classes {V}"
+            # logits: [B, T, V], labels: [B, T]
+            assert logits.dim() == 3, f"logits shape {tuple(logits.shape)}"
+            B, T, V = logits.shape
+            assert labels.shape == (B, T), f"labels {tuple(labels.shape)} vs logits {(B, T, V)}"
+
+            loss = loss_fn(logits.reshape(B*T, V), labels.reshape(B*T))
+
 
             loss = loss_fn(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
             loss.backward()
