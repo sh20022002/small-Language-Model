@@ -144,12 +144,10 @@ class Transformer(nn.Module):
                 break
         return x
 
-    # in transformer.py, inside Transformer
     def resize_token_embeddings(self, new_size: int):
         old_emb = self.token_emb
         old_out = self.to_logits
         old_n, dim = old_emb.num_embeddings, old_emb.embedding_dim
-
         if new_size == old_n:
             return
 

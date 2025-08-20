@@ -131,9 +131,7 @@ class HybridTokenizer:
         else:
             print("\n  Looks healthy — you can likely call freeze_vocab() anytime.")
 
-    # ----------------------------
-    # Vocab freezing (base + merges)
-    # ----------------------------
+   
     def freeze_vocab(self, k_bases: int = 500, max_merges: int = 10_000, min_freq: int = 2) -> None:
         """
         1) Base tokens = top-k words with ≤ byte_limit bytes (by freq)
