@@ -63,9 +63,9 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
         val_loss, correct, total = 0.0, 0, 0
         with torch.no_grad():
             for batch in val_loader:
-                ids    = batch["input_ids"].to(device)
-                attn   = batch["attention_mask"].to(device)
-                labels = batch["labels"].to(device)
+                ids    = batch["input_ids"].to(device, non_blocking=True)
+                attn   = batch["attention_mask"].to(device, non_blocking=True)
+                labels = batch["labels"].to(device, non_blocking=True)
 
                 try:
                     logits = model(ids, attention_mask=attn)
