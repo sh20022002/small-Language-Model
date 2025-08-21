@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import matplotlib as plt
+import matplotlib.pyplot as plt
 
 from torch.utils.data import DataLoader, Dataset
 from sklearn.model_selection import train_test_split
