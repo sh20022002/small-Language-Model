@@ -29,13 +29,13 @@ your-repo/
 
 ### From GitHub (non‑editable)
 ```bash
-pip install "git+https://github.com/<user>/<repo>.git@main"
+pip install "git+https://github.com/sh20022002/small-Language-Model.git@main"
 ```
 
 ### Editable dev install
 ```bash
-git clone https://github.com/<user>/<repo>.git
-pip install -e ./<repo>
+git clone https://github.com/sh20022002/small-Language-Model/tree/main.git
+pip install -e ./small-Language-Model
 ```
 
 > Packaging uses a `src/` layout with the import package **`my_slm`**.
@@ -127,11 +127,11 @@ logits = model(ids, attention_mask=mask)  # [B, T, V]
 
 ```python
 # simple install
-%pip install -q "git+https://github.com/<user>/<repo>.git@main"
+%pip install -q "git+https://github.com/sh20022002/small-Language-Model/tree/main.git@main"
 
 # or live-edit workflow
-!git clone https://github.com/<user>/<repo>.git
-%pip install -e /content/<repo>
+!git clone https://github.com/sh20022002/small-Language-Model/tree/main.git
+%pip install -e /content/small-Language-Model
 ```
 
 Tips:

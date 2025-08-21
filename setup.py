@@ -5,7 +5,7 @@ from setuptools import setup, find_packages
 PACKAGE_NAME = "hybrid-tokenizer"              # Distribution name on PyPI (can differ from import name)
 VERSION = "0.1.0"
 DESCRIPTION = "Hybrid tokenizer + tiny Transformer training utilities."
-URL = "https://example.com/your-repo"          # Replace with your repo URL
+URL = "https://github.com/sh20022002/small-Language-Model"          # Replace with your repo URL
 AUTHOR = "shmuel toren"
 AUTHOR_EMAIL = "shmuel.tor@gmail.com"
 LICENSE = "MIT"
