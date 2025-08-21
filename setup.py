@@ -51,13 +51,11 @@ setup(
     author_email=AUTHOR_EMAIL,
     license=LICENSE,
 
-    # Use src/ layout
-    package_dir={"": "src"},
+      package_dir={"": "src"},
     packages=find_packages(where="src", include=["my_slm", "my_slm.*"]),
     include_package_data=True,
     package_data={
-        # Include common text/json/yaml assets inside the package, if present
-        "": ["*.json", "*.txt", "*.yaml", "*.yml"],
+        "my_slm": ["data/*.pkl.gz", "data/*.json", "data/*.txt", "data/*.yaml", "data/*.yml"],
     },
 
     python_requires=">=3.8",
