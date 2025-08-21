@@ -94,12 +94,12 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
               f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%")
 
     # plots + csv as you had
-    plt.figure(figsize=(12,4))
-    plt.subplot(1,2,1); plt.plot(train_losses, label='Train Loss'); plt.plot(val_losses, label='Val Loss')
-    plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend()
-    plt.subplot(1,2,2); plt.plot(val_accuracies, label='Val Accuracy')
-    plt.xlabel("Epoch"); plt.ylabel("Accuracy (%)"); plt.legend()
-    plt.tight_layout(); plt.show()
+    fig = plt.figure(figsize=(12,4))
+    fig.subplot(1,2,1); fig.plot(train_losses, label='Train Loss'); fig.plot(val_losses, label='Val Loss')
+    fig.xlabel("Epoch"); fig.ylabel("Loss"); fig.legend()
+    fig.subplot(1,2,2); fig.plot(val_accuracies, label='Val Accuracy')
+    fig.xlabel("Epoch"); fig.ylabel("Accuracy (%)"); fig.legend()
+    fig.tight_layout(); fig.show()
 
     pd.DataFrame({"train": train_losses, "val": val_losses}).to_csv("losses.csv", index=False)
     return model
