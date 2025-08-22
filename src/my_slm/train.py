@@ -11,6 +11,8 @@ import pandas as pd
 
 
 def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ignore_index=-100):
+
+    print('started Training...')
     model.to(device)
     loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index)
 
@@ -93,13 +95,15 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}, "
               f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%")
 
-    # plots + csv as you had
-    fig = plt.figure(figsize=(12,4))
-    fig.subplot(1,2,1); fig.plot(train_losses, label='Train Loss'); fig.plot(val_losses, label='Val Loss')
-    fig.xlabel("Epoch"); fig.ylabel("Loss"); fig.legend()
-    fig.subplot(1,2,2); fig.plot(val_accuracies, label='Val Accuracy')
-    fig.xlabel("Epoch"); fig.ylabel("Accuracy (%)"); fig.legend()
-    fig.tight_layout(); fig.show()
+            
+    plt.figure(figsize=(6,4))
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Val Loss')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
     pd.DataFrame({"train": train_losses, "val": val_losses}).to_csv("losses.csv", index=False)
     return model
