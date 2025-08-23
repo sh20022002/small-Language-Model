@@ -130,19 +130,41 @@ class Transformer(nn.Module):
 
 
 
-    def generate(self, x, max_new_tokens=50, eos_token_id='<EOS>'):
-        # Autoregressive generation loop:
-        # At each step, we feed the entire current token sequence to the model,
-        # take the logits at the last position, sample or argmax the next token,
-        # append it to the input, and repeat. This continues until max_new_tokens
-        # is reached or the <EOS> token is generated (if provided).
+    @torch.no_grad()
+    def generate(self, x: torch.Tensor, max_new_tokens: int = 50, eos_token_id: int | None = None):
+        """
+        x: [B, T] LongTensor of token ids
+        Returns: [B, T + ≤max_new_tokens]
+        """
+        self.eval()
+        assert x.dtype in (torch.long, torch.int64), f"expected LongTensor ids, got {x.dtype}"
+        device = next(self.parameters()).device
+        x = x.to(device)
+
+        # use model's max sequence length if available
+        block_size = getattr(self, "max_seq_len", x.size(1))
+
         for _ in range(max_new_tokens):
-            logits = self.forward(x)[:, -1, :]
-            next_token = torch.argmax(logits, dim=-1, keepdim=True)
-            x = torch.cat([x, next_token], dim=1)
-            if eos_token_id is not None and (next_token == eos_token_id).all():
-                break
+            # condition to last block_size tokens
+            x_cond = x[:, -block_size:] if x.size(1) > block_size else x
+
+            # forward: logits [B, T, V]
+            logits = self(x_cond)
+            next_token_logits = logits[:, -1, :]          # [B, V] last step
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)  # [B, 1]
+
+            # append
+            x = torch.cat([x, next_token], dim=1)         # [B, T+1]
+
+            # early stop if everyone hit EOS
+            if eos_token_id is not None:
+                reached_eos = (next_token == int(eos_token_id))  # tensor([ [0/1] ])
+                # torch.all(...) -> 0-dim tensor; .item() makes it a Python bool
+                if torch.all(reached_eos).item():
+                    break
+
         return x
+
 
     def resize_token_embeddings(self, new_size: int):
         old_emb = self.token_emb

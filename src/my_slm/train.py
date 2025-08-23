@@ -104,8 +104,7 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
     plt.legend()
     plt.tight_layout()
     plt.show()
-
-    pd.DataFrame({"train": train_losses, "val": val_losses}).to_csv("losses.csv", index=False)
+    
     return model
 
 
