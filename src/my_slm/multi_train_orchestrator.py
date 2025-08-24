@@ -1,29 +1,21 @@
-"""
-multi_train_orchestrator.py
-Train a single Transformer sequentially across multiple datasets
-using your existing `my_slm.train.train_model` function.
-"""
-
+# multi_train_steps.py
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple, Optional, Dict
-
-import math
-import os
+from typing import Iterable, List, Optional, Dict
+from pathlib import Path
+import itertools
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
-from torch.optim import AdamW
 
 # External datasets
 try:
     from datasets import load_dataset
 except Exception as e:
-    raise SystemExit("Please `pip install datasets` in your environment.") from e
+    raise SystemExit("Please: pip install datasets") from e
 
-# Your package imports
+# Your package (we don't init model/tokenizer here)
 from my_slm.hybrid_tokeniztion import HybridTokenizer
-from my_slm.transformer import Transformer
-from my_slm.train import train_model  # <-- USES YOUR TRAIN LOOP
+from my_slm.train import train_model  # your existing trainer (epoch-based)
 
 # -----------------------------
 # Dataset helpers
@@ -52,7 +44,7 @@ def get_hf_stream_and_text_getter(name: str):
                 return f"### Instruction:\n{ins}\n\n### Response:\n{out}\n"
         getter = getter
     else:
-        raise ValueError(f"Unknown dataset {name}. Choose from: wikitext, tinystories, openwebtext, alpaca.")
+        raise ValueError(f"Unknown dataset {name}. Choose: wikitext, tinystories, openwebtext, alpaca.")
     return ds, getter
 
 class TextTokenDataset(Dataset):
@@ -69,7 +61,7 @@ class TextTokenDataset(Dataset):
                 if max_items and n >= max_items:
                     break
         if not self.samples:
-            raise RuntimeError("No samples produced for dataset; check loader/text getter.")
+            raise RuntimeError("No samples produced; check dataset and text getter.")
 
     def __len__(self): return len(self.samples)
     def __getitem__(self, i): return self.samples[i]
@@ -83,130 +75,107 @@ def make_collate(pad_id: int, ignore_index: int):
         return {"input_ids": ids, "attention_mask": attn, "labels": labels}
     return collate
 
+class SliceLoader:
+    """Wrap a DataLoader to expose only the first `max_batches` batches (for step-based training)."""
+    def __init__(self, loader: DataLoader, max_batches: int):
+        self.loader = loader
+        self.max_batches = max_batches
+    def __iter__(self):
+        return itertools.islice(iter(self.loader), self.max_batches)
+    def __len__(self):
+        try:
+            return min(self.max_batches, len(self.loader))
+        except TypeError:
+            # some loaders may not have __len__
+            return self.max_batches
+
 # -----------------------------
-# Orchestrator
+# Orchestrator (TRAIN-ONLY)
 # -----------------------------
 
 @dataclass
 class StageConfig:
     name: str
-    epochs: int
+    # Either train for full epochs OR for a fixed number of steps (batches)
+    epochs: int = 0
+    steps: int = 0  # if >0, we train only this many steps for the stage
 
-def train_all_datasets(
-    stages: Iterable[StageConfig] = (StageConfig("tinystories", 1),
-                                     StageConfig("wikitext", 1),
-                                     StageConfig("openwebtext", 1),
-                                     StageConfig("alpaca", 1)),
-    tokenizer_path: Optional[str] = None,
-    build_examples: int = 20_000,
-    k_bases: int = 5_000,
-    max_merges: int = 10_000,
+def train_across_datasets(
+    *,
+    model,                          # <-- you pass an initialized model
+    optimizer,                      # <-- you pass an initialized optimizer
+    tokenizer: HybridTokenizer,     # <-- you pass an initialized tokenizer
+    stages: Iterable[StageConfig] = (
+        StageConfig("tinystories", steps=1000),
+        StageConfig("wikitext",   steps=2000),
+        StageConfig("openwebtext", steps=2000),
+        StageConfig("alpaca",     steps=1000),
+    ),
     max_len: int = 256,
-    train_items: int = 50_000,
+    train_items: int = 50_000,      # cap materialized items per stage (for Colab)
     val_items: int = 2_000,
     batch_size: int = 32,
-    lr: float = 3e-4,
-    weight_decay: float = 0.01,
-    dim: int = 256,
-    heads: int = 8,
-    depth: int = 6,
     device: Optional[str] = None,
     save_dir: str = "./out",
-):
+) -> None:
     """
-    Sequentially train a single model across multiple datasets using your `train_model`.
+    Train an existing model/optimizer over multiple datasets.
+    You can choose epoch-based or step-based per stage:
+      - If stage.steps > 0  -> train exactly that many batches (one "micro-epoch")
+      - Else if stage.epochs > 0 -> use your `train_model` for full epochs
 
-    Returns: (model, tokenizer)
+    This function DOES NOT initialize model/tokenizer/optimizer.
     """
-    os.makedirs(save_dir, exist_ok=True)
-
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ----- Tokenizer: load or build from the FIRST stage's stream -----
-    if tokenizer_path and Path(tokenizer_path).exists():
-        print(f"[Tokenizer] Loading from {tokenizer_path}")
-        tok = HybridTokenizer.load(tokenizer_path)
-    else:
-        first_stage = next(iter(stages)).name if hasattr(stages, "__iter__") else "wikitext"
-        print(f"[Tokenizer] Building from first stage '{first_stage}' (examples={build_examples})")
-        stream, getter = get_hf_stream_and_text_getter(first_stage)
-        tok = HybridTokenizer()
-        for i, ex in enumerate(stream):
-            tok.add_text(getter(ex))
-            if (i + 1) >= build_examples:
-                break
-        tok.freeze_vocab(k_bases=k_bases, max_merges=max_merges)
-        if tokenizer_path:
-            Path(tokenizer_path).parent.mkdir(parents=True, exist_ok=True)
-            tok.save(tokenizer_path)
-            print(f"[Tokenizer] Saved to {tokenizer_path}")
+    pad_id = tokenizer.token2id["<PAD>"]
 
-    pad_id = tok.token2id["<PAD>"]
-
-    # ----- Model -----
-    model = Transformer(vocab_size=tok.vocab_size, dim=dim, heads=heads, depth=depth, max_seq_len=max_len)
-    # Ensure vocab alignment if Transformer ignores vocab_size ctor
-    if getattr(model, "token_emb", None) is not None and getattr(model.token_emb, "num_embeddings", None) != tok.vocab_size:
-        try:
-            model.resize_token_embeddings(tok.vocab_size)
-        except Exception:
-            pass
-    model.to(device)
-
-    # ----- Optimizer -----
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    # ----- Stage loop -----
     for stage in stages:
         name = stage.name.lower()
-        epochs = stage.epochs
-        print(f"\n=== Stage: {name} | epochs={epochs} ===")
+        print(f"\n=== Stage: {name} | epochs={stage.epochs} | steps={stage.steps} ===")
 
         # Build datasets & loaders
         train_stream, getter = get_hf_stream_and_text_getter(name)
-        val_stream, _ = get_hf_stream_and_text_getter(name)  # reuse split for demo
+        val_stream, _        = get_hf_stream_and_text_getter(name)
 
-        train_ds = TextTokenDataset(train_stream, getter, tok, max_len=max_len, max_items=train_items)
-        val_ds   = TextTokenDataset(val_stream,   getter, tok, max_len=max_len, max_items=val_items)
+        train_ds = TextTokenDataset(train_stream, getter, tokenizer, max_len=max_len, max_items=train_items)
+        val_ds   = TextTokenDataset(val_stream,   getter, tokenizer, max_len=max_len, max_items=val_items)
 
         collate = make_collate(pad_id=pad_id, ignore_index=pad_id)
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  collate_fn=collate, num_workers=0)
-        val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, collate_fn=collate, num_workers=0)
+        base_train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  collate_fn=collate, num_workers=0)
+        val_loader        = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, collate_fn=collate, num_workers=0)
 
-        # -----> Use YOUR train_model here <-----
-        train_model(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            optimizer=optimizer,
-            device=device,
-            epochs=epochs,
-            ignore_index=pad_id,
-        )
+        # ---- Option A: STEP-BASED training (limit number of batches) ----
+        if stage.steps and stage.steps > 0:
+            # Wrap the base loader to expose only `steps` batches
+            train_loader = SliceLoader(base_train_loader, max_batches=stage.steps)
+            # Call *your* epoch-based function with epochs=1,
+            # but the loader only has `steps` batches so it trains that many steps.
+            train_model(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                optimizer=optimizer,
+                device=device,
+                epochs=1,                  # one pass over our sliced loader
+                ignore_index=pad_id,
+            )
+        # ---- Option B: EPOCH-BASED training (full passes over dataset) ----
+        elif stage.epochs and stage.epochs > 0:
+            train_model(
+                model=model,
+                train_loader=base_train_loader,
+                val_loader=val_loader,
+                optimizer=optimizer,
+                device=device,
+                epochs=stage.epochs,
+                ignore_index=pad_id,
+            )
+        else:
+            print(f"[Skip] Stage '{name}' has neither epochs nor steps > 0.")
 
-        # Save a stage checkpoint
+        # Save per-stage checkpoint (optional)
         ckpt_path = Path(save_dir) / f"{stage.name}_stage.pt"
-        torch.save({"model": model.state_dict(), "vocab_size": tok.vocab_size}, ckpt_path)
+        torch.save({"model": model.state_dict()}, ckpt_path)
         print(f"[Checkpoint] Saved {ckpt_path}")
-
-        # Optional: sample generate if model has .generate
-        try:
-            prompt = "Hello" if name != "alpaca" else "### Instruction:\nSay hello politely.\n\n### Response:\n"
-            ids = tok.encode(prompt, mode="flat")[:max_len]
-            if ids:
-                x = torch.tensor(ids, dtype=torch.long, device=device).unsqueeze(0)
-                if hasattr(model, "generate"):
-                    y = model.generate(x, max_new_tokens=50, eos_token_id=tok.token2id.get("<EOS>"))
-                else:
-                    with torch.no_grad():
-                        logits = model(x)
-                        y = torch.cat([x, logits.argmax(-1)[:, -1:]], dim=1)
-                print("[Sample]", tok.decode(y[0].tolist()))
-        except Exception as e:
-            print(f"[Sample] skipped ({e})")
-
-    # Final
-    final_path = Path(save_dir) / "final.pt"
-    torch.save({"model": model.state_dict(), "vocab_size": tok.vocab_size}, final_path)
-    print(f"[Final] Saved {final_path}")
-    return model, tok
