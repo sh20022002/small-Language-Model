@@ -10,7 +10,7 @@ The SLM bits include a minimal Transformer, dataloader, and training utilities.
 ## Repo layout
 
 ```
-your-repo/
+small-Language-Model/
 ├─ setup.py
 ├─ README.md
 ├─ notebooks/                        #  (not packaged)
