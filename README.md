@@ -13,14 +13,19 @@ The SLM bits include a minimal Transformer, dataloader, and training utilities.
 your-repo/
 ├─ setup.py
 ├─ README.md
-├─ notebooks/            # example notebooks (not packaged)
-├─ tests/                # unit tests (pytest)
+├─ notebooks/                        #  (not packaged)
+├─ tests/                
+   └─mfu.py                          # tests device flops
 └─ src/
-   └─ my_slm/            # installable package
+   └─ my_slm/                        # installable package
       ├─ __init__.py
-      ├─ hybrid_tokeniztion.py   # HybridTokenizer
-      ├─ transformer.py          # tiny Transformer
-      └─ train.py                # dataloader + training loop
+      ├─ hybrid_tokeniztion.py       # HybridTokenizer
+      ├─ transformer.py              # tiny Transformer
+      ├─ train.py                    # dataloader + training loop
+      ├─ multi_train_orchestrator.py # trains on datasets
+      ├─ benchmark_logger.py         # tests model on benchmark and logs reoults
+      └─ data/
+         └─ tokenizer_state.pkl.gz   # copressed freezed tokenizer
 ```
 
 ---
