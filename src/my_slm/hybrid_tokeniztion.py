@@ -214,40 +214,41 @@ class HybridTokenizer:
     def encode(
         self,
         text: str,
-        mode: Literal["rle", "flat"] = "rle"
-    ) -> Union[List[Tuple[int, int]], List[int]]:
-        """Encode text into token ids.
-
-        mode="rle": return run-length compressed list of (token_id, count)
-        mode="flat": return flat list of token_ids (no counts)
-        """
+        mode: Literal["rle", "flat"] = "rle") -> Union[List[Tuple[int, int]], List[int]]:
         if not self.frozen:
             raise RuntimeError("call freeze_vocab() first")
 
         ids: List[int] = []
-        for tok in TOKEN_RE.findall(text):
-            if tok == "\n":                 # newline → <NL>
-                ids.append(self.nl_id)
-            elif tok.isspace():            # any other whitespace → <SP> (preserve run length)
-                ids.extend([self.sp_id] * len(tok))
-            elif tok in self.token2id:     # exact token (includes learned merges)
-                ids.append(self.token2id[tok])
-            elif SPECIAL_RE.match(tok):    # punctuation / emoji → bytes
-                ids.extend(self._bytes_to_ids(tok.encode("utf-8")))
-            else:                          # word-like
-                norm = self._norm(tok)
-                if norm == tok:
-                    # safe to use learned subword tokens
-                    ids.extend(self._encode_word(norm))
-                else:
-                    # preserve original casing by falling back to raw bytes
-                    ids.extend(self._bytes_to_ids(tok.encode("utf-8")))
+        pending_space = False  # <--- NEW: collapse any whitespace run to a single <SP>
 
+        for tok in TOKEN_RE.findall(text):
+            if tok == "\n":                  # newline → <NL>
+                ids.append(self.nl_id)
+                pending_space = False        # reset after newline
+            elif tok.isspace():              # any other whitespace → remember there was a space
+                pending_space = True
+                continue                     # don't emit yet; we’ll add one <SP> before next token
+            else:
+                # If we saw whitespace before this token, emit exactly one <SP>
+                if pending_space:
+                    ids.append(self.sp_id)
+                    pending_space = False
+
+                if tok in self.token2id:     # exact token (includes learned merges)
+                    ids.append(self.token2id[tok])
+                elif SPECIAL_RE.match(tok):  # punctuation / emoji → bytes
+                    ids.extend(self._bytes_to_ids(tok.encode("utf-8")))
+                else:                        # word-like
+                    norm = self._norm(tok)
+                    if norm == tok:
+                        ids.extend(self._encode_word(norm))
+                    else:
+                        ids.extend(self._bytes_to_ids(tok.encode("utf-8")))
 
         if mode == "flat":
             return ids
 
-        # run-length compress
+        # RLE (unchanged)
         compressed: List[Tuple[int, int]] = []
         for tid in ids:
             if compressed and compressed[-1][0] == tid:
