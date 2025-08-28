@@ -53,6 +53,7 @@ class HybridTokenizer:
         self.special_tokens = list(dict.fromkeys(special_tokens))
         self.lowercase = lowercase
         self.byte_limit = int(byte_limit)
+        self.SPACE_PREFIX = '_'
 
         self.word_db: Counter[str] = Counter()
         self.token2id: dict[str, int] = {}
@@ -211,108 +212,117 @@ class HybridTokenizer:
         self.frozen = True
 
     
-    def encode(
-        self,
-        text: str,
-        mode: Literal["rle", "flat"] = "rle") -> Union[List[Tuple[int, int]], List[int]]:
+    def encode(self, text: str, mode: str = "flat"):
         if not self.frozen:
             raise RuntimeError("call freeze_vocab() first")
 
-        ids: List[int] = []
-        pending_space = False  # <--- NEW: collapse any whitespace run to a single <SP>
+        ids = []
+        pending_space = False
+
+        # helper: append one token by string (normal or fused)
+        def append_token_str(tok_str: str, leading_space: bool):
+            # try fused
+            if leading_space:
+                sp_form = self.SPACE_PREFIX + tok_str
+                tid = self.token2id.get(sp_form)
+                if tid is not None:
+                    ids.append(tid)
+                    return True
+            # try plain
+            tid = self.token2id.get(tok_str)
+            if tid is not None:
+                if leading_space:
+                    # fallback: explicit <SP> + plain token
+                    ids.append(self.sp_id)
+                ids.append(tid)
+                return True
+            return False  # let caller handle bytes / subpieces
 
         for tok in TOKEN_RE.findall(text):
-            if tok == "\n":                  # newline → <NL>
+            if tok == "\n":
                 ids.append(self.nl_id)
-                pending_space = False        # reset after newline
-            elif tok.isspace():              # any other whitespace → remember there was a space
+                pending_space = False
+                continue
+            if tok.isspace():
                 pending_space = True
-                continue                     # don't emit yet; we’ll add one <SP> before next token
-            else:
-                # If we saw whitespace before this token, emit exactly one <SP>
-                if pending_space:
-                    ids.append(self.sp_id)
-                    pending_space = False
+                continue
 
-                if tok in self.token2id:     # exact token (includes learned merges)
-                    ids.append(self.token2id[tok])
-                elif SPECIAL_RE.match(tok):  # punctuation / emoji → bytes
+            # Tokenize this chunk into pieces (your existing word/SPECIAL/bytes logic)
+            if tok in self.token2id or SPECIAL_RE.match(tok):
+                # single known token or special: try fused first
+                if not append_token_str(tok, pending_space):
+                    # unknown special → bytes with optional leading <SP> fallback
+                    if pending_space:
+                        ids.append(self.sp_id)
                     ids.extend(self._bytes_to_ids(tok.encode("utf-8")))
-                else:                        # word-like
-                    norm = self._norm(tok)
-                    if norm == tok:
-                        ids.extend(self._encode_word(norm))
+                pending_space = False
+            else:
+                norm = self._norm(tok)
+                # break into subpieces with your current _encode_word()
+                pieces = self._encode_word(norm)  # returns list of token ids OR strings; adapt as needed
+                # if it returns ids, map to strings: pieces_str = [self.id2token[i] for i in pieces]
+                pieces_str = [self.id2token[p] if isinstance(p, int) else p for p in pieces]
+
+                first_done = False
+                for p_str in pieces_str:
+                    if not first_done:
+                        if append_token_str(p_str, pending_space):
+                            pass
+                        else:
+                            # fallback: leading space + bytes
+                            if pending_space:
+                                ids.append(self.sp_id)
+                            ids.extend(self._bytes_to_ids(p_str.encode("utf-8")))
+                        first_done = True
+                        pending_space = False
                     else:
-                        ids.extend(self._bytes_to_ids(tok.encode("utf-8")))
+                        if not append_token_str(p_str, False):
+                            ids.extend(self._bytes_to_ids(p_str.encode("utf-8")))
 
         if mode == "flat":
             return ids
 
-        # RLE (unchanged)
-        compressed: List[Tuple[int, int]] = []
+        # RLE as you already do
+        out = []
         for tid in ids:
-            if compressed and compressed[-1][0] == tid:
-                t, c = compressed[-1]
-                compressed[-1] = (t, c + 1)
+            if out and out[-1][0] == tid:
+                t, c = out[-1]
+                out[-1] = (t, c + 1)
             else:
-                compressed.append((tid, 1))
-        return compressed
+                out.append((tid, 1))
+        return out
 
     def _flush_bytes(self, buffer: bytearray, out: list[str]) -> None:
         if buffer:
             out.append(buffer.decode("utf-8", errors="replace"))
             buffer.clear()
 
-    def decode(self, encoded: Union[Sequence[int], Sequence[Tuple[int, int]]]) -> str:
-        """Decode from flat ids or RLE pairs back to a UTF‑8 string."""
-        if isinstance(encoded, (int, str, bytes, bytearray)):
-            raise TypeError("decode expects a sequence of ids or (id,count) pairs")
+    def decode(self, seq):
+        # if seq is RLE, expand; if flat, use as-is
+        ids = self._expand_rle(seq) if isinstance(seq[0], tuple) else seq
+        out = []
 
-        # Optional: tensor/ndarray friendliness
-        try:
-            import torch  # type: ignore
-            if isinstance(encoded, torch.Tensor):
-                encoded = encoded.detach().cpu().tolist()
-        except Exception:
-            pass
-        try:
-            import numpy as np  # type: ignore
-            if isinstance(encoded, np.ndarray):
-                encoded = encoded.tolist()
-        except Exception:
-            pass
-
-        if not encoded:
-            return ""
-
-        first = encoded[0]
-        if isinstance(first, int):
-            pairs = [(int(t), 1) for t in encoded]  # flat ids
-        else:
-            pairs = [(int(t), int(c)) for (t, c) in encoded]  # rle pairs
-            for _, c in pairs:
-                if c <= 0:
-                    raise ValueError("Non-positive count in encoded stream")
-
-        V = len(self.id2token)
-        for tid, _ in pairs:
-            if not (0 <= tid < V):
-                raise IndexError(f"Token id {tid} out of range [0,{V-1}]")
-
-        out: list[str] = []
-        buf = bytearray()
-        for tid, cnt in pairs:
+        for tid in ids:
             tok = self.id2token[tid]
-            if tok == "<SP>":
-                self._flush_bytes(buf, out); out.append(" " * cnt)
-            elif tok == "<NL>":
-                self._flush_bytes(buf, out); out.append("\n" * cnt)
-            elif tok.startswith("byte_"):
-                byte_val = int(tok[5:]); buf.extend([byte_val] * cnt)
-            else:
-                self._flush_bytes(buf, out); out.extend([tok] * cnt)
-        self._flush_bytes(buf, out)
+            if tid == self.sp_id:
+                out.append(" ")                # keep single space if present
+                continue
+            if tid == self.nl_id:
+                out.append("\n")
+                continue
+            if tok.startswith("byte_"):
+                b = int(tok.split("_", 1)[1])
+                out.append(bytes([b]).decode("utf-8", errors="replace"))
+                continue
+            if tok.startswith(self.SPACE_PREFIX):
+                out.append(" ")
+                tok = tok[len(self.SPACE_PREFIX):]  # strip marker and fall through
+
+            # normal token string
+            out.append(tok)
+
         return "".join(out)
+
 
     
     def _add_token(self, token: str) -> None:
