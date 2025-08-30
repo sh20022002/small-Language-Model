@@ -105,6 +105,7 @@ def train_across_datasets(
     model,                          # <-- you pass an initialized model
     optimizer,                      # <-- you pass an initialized optimizer
     tokenizer: HybridTokenizer,     # <-- you pass an initialized tokenizer
+    epochs: int = 3,
     stages: Iterable[StageConfig] = (
         StageConfig("tinystories", steps=1000),
         StageConfig("wikitext",   steps=2000),
@@ -115,7 +116,6 @@ def train_across_datasets(
     train_items: int = 50_000,      # cap materialized items per stage (for Colab)
     val_items: int = 2_000,
     batch_size: int = 32,
-    device: Optional[str] = None,
     save_dir: str = "./out",
 ) -> None:
     """
@@ -152,18 +152,18 @@ def train_across_datasets(
             train_loader = SliceLoader(base_train_loader, max_batches=stage.steps)
             # Call *your* epoch-based function with epochs=1,
             # but the loader only has `steps` batches so it trains that many steps.
-            train_model(
+            model = train_model(
                 model=model,
                 train_loader=train_loader,
                 val_loader=val_loader,
                 optimizer=optimizer,
                 device=device,
-                epochs=1,                  # one pass over our sliced loader
+                epochs=epochs,                  # one pass over our sliced loader
                 ignore_index=pad_id,
             )
         # ---- Option B: EPOCH-BASED training (full passes over dataset) ----
         elif stage.epochs and stage.epochs > 0:
-            train_model(
+            model = train_model(
                 model=model,
                 train_loader=base_train_loader,
                 val_loader=val_loader,
@@ -179,3 +179,4 @@ def train_across_datasets(
         ckpt_path = Path(save_dir) / f"{stage.name}_stage.pt"
         torch.save({"model": model.state_dict()}, ckpt_path)
         print(f"[Checkpoint] Saved {ckpt_path}")
+        return model
