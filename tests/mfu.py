@@ -102,7 +102,7 @@ def run_perf_and_mfu(*, promised_fp32_tflops=None, promised_bf16_tflops=None,
     If promised numbers aren't provided, tries to infer them from GPU name.
     Returns a dict with results for 'fp32' and 'bf16'.
     """
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    dev =  "cuda" if torch.cuda.is_available() else "cpu"
     dev_name = torch.cuda.get_device_name(0) if dev == "cuda" else "CPU"
     print(f"Device: {dev_name} ({dev})")
 
@@ -171,5 +171,5 @@ def run_perf_and_mfu(*, promised_fp32_tflops=None, promised_bf16_tflops=None,
     return results
 
 # Example:
-# results = run_perf_and_mfu()
+results = run_perf_and_mfu()
 # results = run_perf_and_mfu(promised_fp32_tflops=19.5, promised_bf16_tflops=312.0)  # override
