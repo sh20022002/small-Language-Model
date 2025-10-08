@@ -170,6 +170,11 @@ def run_perf_and_mfu(*, promised_fp32_tflops=None, promised_bf16_tflops=None,
             print("run_perf_and_mfu(promised_fp32_tflops=19.5, promised_bf16_tflops=312.0)  # A100 example")
     return results
 
-# Example:
-results = run_perf_and_mfu()
+
+def main():
+    results = run_perf_and_mfu()
+
+if __name__ =="__main__":
+    main()
+
 # results = run_perf_and_mfu(promised_fp32_tflops=19.5, promised_bf16_tflops=312.0)  # override
