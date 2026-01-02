@@ -55,7 +55,7 @@ setup(
     packages=find_packages(where="src", include=["my_slm", "my_slm.*"]),
     include_package_data=True,
     package_data={
-        "my_slm": ["data/*.pkl.gz", "data/*.json", "data/*.txt", "data/*.yaml", "data/*.yml"],
+        "my_slm": ["data/*.pkl.gz", "data/*.json", "data/*.txt", "data/*.yaml", "data/*.yml", "data/*.py"],
     },
 
     python_requires=">=3.8",
