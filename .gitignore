@@ -1,1 +1,23 @@
 __pycache__/
+*.pyc
+.env
+*.env
+.env.*
+
+# Model checkpoints and large files
+*.pt
+*.ckpt
+*.pkl
+*.pkl.gz
+*.bin
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
