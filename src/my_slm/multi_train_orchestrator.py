@@ -105,6 +105,7 @@ def train_across_datasets(
     model,                          # <-- you pass an initialized model
     optimizer,                      # <-- you pass an initialized optimizer
     tokenizer: HybridTokenizer,     # <-- you pass an initialized tokenizer
+    device: Optional[str] = None,   # "cuda" / "cpu" — auto-detected if None
     epochs: int = 3,
     stages: Iterable[StageConfig] = (
         StageConfig("tinystories", steps=1000),
@@ -127,7 +128,8 @@ def train_across_datasets(
     This function DOES NOT initialize model/tokenizer/optimizer.
     """
     Path(save_dir).mkdir(parents=True, exist_ok=True)
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
     pad_id = tokenizer.token2id["<PAD>"]
 
@@ -142,24 +144,21 @@ def train_across_datasets(
         train_ds = TextTokenDataset(train_stream, getter, tokenizer, max_len=max_len, max_items=train_items)
         val_ds   = TextTokenDataset(val_stream,   getter, tokenizer, max_len=max_len, max_items=val_items)
 
-        collate = make_collate(pad_id=pad_id, ignore_index=pad_id)
+        collate = make_collate(pad_id=pad_id, ignore_index=-100)
         base_train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  collate_fn=collate, num_workers=0)
         val_loader        = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, collate_fn=collate, num_workers=0)
 
         # ---- Option A: STEP-BASED training (limit number of batches) ----
         if stage.steps and stage.steps > 0:
-            # Wrap the base loader to expose only `steps` batches
             train_loader = SliceLoader(base_train_loader, max_batches=stage.steps)
-            # Call *your* epoch-based function with epochs=1,
-            # but the loader only has `steps` batches so it trains that many steps.
             model = train_model(
                 model=model,
                 train_loader=train_loader,
                 val_loader=val_loader,
                 optimizer=optimizer,
                 device=device,
-                epochs=epochs,                  # one pass over our sliced loader
-                ignore_index=pad_id,
+                epochs=1,   # one pass over the sliced loader = exactly `steps` batches
+                ignore_index=-100,
             )
         # ---- Option B: EPOCH-BASED training (full passes over dataset) ----
         elif stage.epochs and stage.epochs > 0:
@@ -170,7 +169,7 @@ def train_across_datasets(
                 optimizer=optimizer,
                 device=device,
                 epochs=stage.epochs,
-                ignore_index=pad_id,
+                ignore_index=-100,
             )
         else:
             print(f"[Skip] Stage '{name}' has neither epochs nor steps > 0.")
@@ -179,4 +178,5 @@ def train_across_datasets(
         ckpt_path = Path(save_dir) / f"{stage.name}_stage.pt"
         torch.save({"model": model.state_dict()}, ckpt_path)
         print(f"[Checkpoint] Saved {ckpt_path}")
-        return model
+
+    return model

@@ -13,12 +13,9 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x):
-        # RMSNorm computes the root-mean-square of the input across the last dimension:
-        # norm = sqrt(mean(x^2)). This differs from LayerNorm, which subtracts the mean
-        # and divides by standard deviation (involving variance). RMSNorm is more efficient
-        # and numerically stable for large models.
-        norm = x.norm(dim=-1, keepdim=True)
-        return self.weight * x / (norm + self.eps)
+        # RMS = sqrt(mean(x^2)) — NOT the L2 norm (which lacks the 1/dim factor)
+        norm = (x.pow(2).mean(dim=-1, keepdim=True) + self.eps).sqrt()
+        return self.weight * x / norm
 
 # RoPE (Rotary Positional Embeddings) encodes position information by rotating query and key vectors in complex space.
 # This allows positional dependencies to be baked directly into the dot-product attention mechanism without needing additive embeddings.
@@ -49,21 +46,26 @@ class MultiHeadLocalAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=False)
         self.out = nn.Linear(dim, dim)
 
-    def forward(self, x):
-        B, T, C = x.shape  # B: batch size, T: sequence length, C: embedding dim
-        H, D = self.heads, self.head_dim  # H: number of heads, D: head dim
+    def forward(self, x, attention_mask=None):
+        B, T, C = x.shape
+        H, D = self.heads, self.head_dim
 
-        # Project input into query, key, and value representations
-        # Reshape to (B, T, H, 3D) then transpose to (B, H, T, 3D) for multi-head parallelism
         qkv = self.qkv(x).view(B, T, H, 3 * D).transpose(1, 2)  # (B, H, T, 3D)
-        q, k, v = qkv.chunk(3, dim=-1)  # Split last dim into 3: (B, H, T, D) each
+        q, k, v = qkv.chunk(3, dim=-1)
 
         q, k = RoPE.apply(q), RoPE.apply(k)
 
         attn = torch.matmul(q, k.transpose(-2, -1)) / (D ** 0.5)  # (B, H, T, T)
         local_mask = self._causal_local_mask(T, self.window, x.device)
         attn = attn.masked_fill(local_mask == 0, float('-inf'))
+
+        # Mask out padding keys so they never receive attention weight
+        if attention_mask is not None:
+            pad_mask = attention_mask[:, None, None, :].bool()  # (B, 1, 1, T)
+            attn = attn.masked_fill(~pad_mask, float('-inf'))
+
         attn = F.softmax(attn, dim=-1)
+        attn = torch.nan_to_num(attn, nan=0.0)  # all-masked rows → 0 instead of NaN
 
         out = torch.matmul(attn, v)  # (B, H, T, D)
         out = out.transpose(1, 2).contiguous().view(B, T, C)
@@ -99,8 +101,8 @@ class TransformerBlock(nn.Module):
         self.norm2 = RMSNorm(dim)
         self.ff = FeedForward(dim, mlp_dim)
 
-    def forward(self, x):
-        x = x + self.attn(self.norm1(x))
+    def forward(self, x, attention_mask=None):
+        x = x + self.attn(self.norm1(x), attention_mask=attention_mask)
         x = x + self.ff(self.norm2(x))
         return x
 
@@ -120,10 +122,8 @@ class Transformer(nn.Module):
             x = self.token_emb(x)  # -> [B, T, C]
         assert x.dim() == 3, f"expected [B,T,C], got {tuple(x.shape)}"
 
-        #  Iterate over blocks instead of calling the ModuleList
         for block in self.blocks:
-            # if your blocks don’t take a mask, just call block(x)
-            x = block(x)
+            x = block(x, attention_mask=attention_mask)
 
         x = self.norm(x)
         return self.to_logits(x)

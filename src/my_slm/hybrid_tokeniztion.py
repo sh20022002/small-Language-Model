@@ -209,6 +209,14 @@ class HybridTokenizer:
             self._add_token(merged)
             self.merge_rules[merged] = (a, b)
 
+        # Pre-register all 256 byte fallback tokens so vocab_size is stable after freeze.
+        # Without this, _bytes_to_ids adds new tokens during encode(), causing the
+        # embedding table to grow mid-training and triggering expensive resizes every batch.
+        for b in range(256):
+            tok = f"byte_{b}"
+            if tok not in self.token2id:
+                self._add_token(tok)
+
         self.frozen = True
 
     

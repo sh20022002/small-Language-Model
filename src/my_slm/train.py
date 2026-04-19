@@ -9,58 +9,69 @@ from sklearn.model_selection import train_test_split
 import pandas as pd
 
 
-
-def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ignore_index=-100):
-
+def train_model(
+    model,
+    train_loader,
+    val_loader,
+    optimizer,
+    device,
+    epochs=5,
+    ignore_index=-100,
+    max_grad_norm=1.0,
+):
     print('started Training...')
+    device = torch.device(device) if isinstance(device, str) else device
     model.to(device)
     loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index)
 
+    # Mixed precision: on CUDA use float16; on CPU/MPS fall back to bfloat16 or disabled
+    use_amp = device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
     train_losses, val_losses, val_accuracies = [], [], []
 
-    # (optional) grab embedding to know vocab size
-    emb = next((m for m in model.modules() if isinstance(m, nn.Embedding)), None)
+    # Resize embeddings once before training if vocab grew after freeze
+    if hasattr(model, "token_emb") and hasattr(model, "resize_token_embeddings"):
+        try:
+            all_ids = []
+            for batch in train_loader:
+                all_ids.append(int(batch["input_ids"].max()))
+            if all_ids:
+                max_id = max(all_ids)
+                if max_id >= model.token_emb.num_embeddings:
+                    model.resize_token_embeddings(max_id + 1)
+                    print(f"[Info] Resized embeddings to {max_id + 1}")
+        except Exception:
+            pass  # streaming loaders may not support this pre-scan
 
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
 
         for batch in train_loader:
-            ids    = batch["input_ids"].to(device)          # [B, T]
-            attn   = batch["attention_mask"].to(device)     # [B, T]
-            labels = batch["labels"].to(device)             # [B, T] with -100 on pads
+            ids    = batch["input_ids"].to(device, non_blocking=True)
+            attn   = batch["attention_mask"].to(device, non_blocking=True)
+            labels = batch["labels"].to(device, non_blocking=True)
 
-           
-            if emb is not None:
-                mx, mn = int(ids.max()), int(ids.min())
-                assert mn >= 0, f"Negative token id: {mn}"
-                if mx >= model.token_emb.num_embeddings:
-                    model.resize_token_embeddings(mx + 1)
+            optimizer.zero_grad(set_to_none=True)
 
-
-            optimizer.zero_grad()
-
-            try:
+            with torch.cuda.amp.autocast(enabled=use_amp):
                 logits = model(ids, attention_mask=attn)    # [B, T, V]
-            except TypeError:
-                logits = model(ids)
+                B, T, V = logits.shape
+                loss = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
 
-            # logits: [B, T, V], labels: [B, T]
-            assert logits.dim() == 3, f"logits shape {tuple(logits.shape)}"
-            B, T, V = logits.shape
-            assert labels.shape == (B, T), f"labels {tuple(labels.shape)} vs logits {(B, T, V)}"
-
-            loss = loss_fn(logits.reshape(B*T, V), labels.reshape(B*T))
-
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            # Unscale before clipping so the clip threshold is in real gradient units
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
 
             total_loss += loss.detach().item()
 
         avg_train_loss = total_loss / max(1, len(train_loader))
         train_losses.append(avg_train_loss)
 
-        
         model.eval()
         val_loss, correct, total = 0.0, 0, 0
         with torch.no_grad():
@@ -69,21 +80,15 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
                 attn   = batch["attention_mask"].to(device, non_blocking=True)
                 labels = batch["labels"].to(device, non_blocking=True)
 
-                try:
+                with torch.cuda.amp.autocast(enabled=use_amp):
                     logits = model(ids, attention_mask=attn)
-                except TypeError:
-                    logits = model(ids)
+                    B, T, V = logits.shape
+                    loss = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
 
-                # logits: [B, T, V], labels: [B, T]
-                assert logits.dim() == 3, f"logits shape {tuple(logits.shape)}"
-                B, T, V = logits.shape
-                assert labels.shape == (B, T), f"labels {tuple(labels.shape)} vs logits {(B, T, V)}"
-
-                loss = loss_fn(logits.reshape(B*T, V), labels.reshape(B*T))
                 val_loss += loss.detach().item()
 
-                pred = logits.argmax(dim=-1)               # [B, T]
-                mask = labels != ignore_index              # ignore pads in accuracy
+                pred = logits.argmax(dim=-1)
+                mask = labels != ignore_index
                 correct += (pred[mask] == labels[mask]).sum().item()
                 total   += mask.sum().item()
 
@@ -95,16 +100,15 @@ def train_model(model, train_loader, val_loader, optimizer, device, epochs=5, ig
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}, "
               f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%")
 
-            
-    plt.figure(figsize=(6,4))
+    plt.figure(figsize=(6, 4))
     plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Val Loss')
+    plt.plot(val_losses,   label='Val Loss')
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend()
     plt.tight_layout()
     plt.show()
-    
+
     return model
 
 

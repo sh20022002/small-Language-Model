@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hybrid-tokenizer"
+version = "0.1.0"
+description = "Hybrid tokenizer + tiny Transformer training utilities."
+readme = "README.md"
+authors = [{ name = "shmuel toren", email = "shmuel.tor@gmail.com" }]
+license = { text = "MIT" }
+requires-python = ">=3.8"
+keywords = ["tokenizer", "nlp", "transformer", "pytorch"]
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.21",
+    "tqdm>=4.60",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "black", "isort", "ruff"]
+
+[project.urls]
+Homepage = "https://github.com/sh20022002/small-Language-Model"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["my_slm", "my_slm.*"]
+
+[tool.setuptools.package-data]
+my_slm = ["data/*.pkl.gz", "data/*.json", "data/*.txt", "data/*.yaml", "data/*.yml"]
