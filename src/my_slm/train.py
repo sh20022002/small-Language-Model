@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,6 +10,16 @@ from sklearn.model_selection import train_test_split
 import pandas as pd
 
 
+def get_cosine_schedule_with_warmup(optimizer, warmup_steps: int, total_steps: int):
+    """Linear warmup then cosine decay to 0. Step once per batch."""
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
 def train_model(
     model,
     train_loader,
@@ -18,6 +29,7 @@ def train_model(
     epochs=5,
     ignore_index=-100,
     max_grad_norm=1.0,
+    scheduler=None,
 ):
     print('started Training...')
     device = torch.device(device) if isinstance(device, str) else device
@@ -61,11 +73,12 @@ def train_model(
                 loss = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
 
             scaler.scale(loss).backward()
-            # Unscale before clipping so the clip threshold is in real gradient units
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
+            if scheduler is not None:
+                scheduler.step()
 
             total_loss += loss.detach().item()
 
