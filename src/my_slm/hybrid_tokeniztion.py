@@ -300,6 +300,12 @@ class HybridTokenizer:
                 out.append((tid, 1))
         return out
 
+    def _expand_rle(self, seq) -> list[int]:
+        out = []
+        for tid, count in seq:
+            out.extend([tid] * count)
+        return out
+
     def _flush_bytes(self, buffer: bytearray, out: list[str]) -> None:
         if buffer:
             out.append(buffer.decode("utf-8", errors="replace"))
