@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 class RMSNorm(nn.Module):
@@ -107,8 +108,9 @@ class TransformerBlock(nn.Module):
 
 class Transformer(nn.Module):
     def __init__(self, vocab_size, dim, depth, heads, mlp_dim, window,
-                 dropout=0.0, tie_weights=True):
+                 dropout=0.0, tie_weights=True, use_checkpoint=False):
         super().__init__()
+        self.use_checkpoint = use_checkpoint
         self.token_emb = nn.Embedding(vocab_size, dim)
         self.drop      = nn.Dropout(dropout)
         self.blocks    = nn.ModuleList([
@@ -141,7 +143,10 @@ class Transformer(nn.Module):
 
         x = self.drop(x)
         for block in self.blocks:
-            x = block(x, attention_mask=attention_mask)
+            if self.use_checkpoint and self.training:
+                x = checkpoint(block, x, attention_mask, use_reentrant=False)
+            else:
+                x = block(x, attention_mask=attention_mask)
         x = self.norm(x)
         return self.to_logits(x)
 
