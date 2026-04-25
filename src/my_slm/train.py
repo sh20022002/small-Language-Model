@@ -55,12 +55,12 @@ def train_model(
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    # bfloat16 on capable hardware (A100+): more stable than float16, no scaler needed
-    # float16 on T4/V100: requires GradScaler to prevent underflow
-    use_amp  = device.type == "cuda"
-    amp_dtype = (torch.bfloat16
-                 if use_amp and torch.cuda.is_bf16_supported()
-                 else torch.float16)
+    # bfloat16 requires Ampere (compute capability ≥ 8.0, e.g. A100).
+    # T4 is 7.5 — is_bf16_supported() can return True there but hardware
+    # doesn't accelerate it; always use float16 + GradScaler on T4/V100.
+    use_amp = device.type == "cuda"
+    _major  = torch.cuda.get_device_capability()[0] if use_amp else 0
+    amp_dtype = torch.bfloat16 if _major >= 8 else torch.float16
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp and amp_dtype == torch.float16)
 
     train_losses, val_losses, val_accuracies = [], [], []
