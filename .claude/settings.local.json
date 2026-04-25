@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_model.py tests/test_training.py -q)"
+    ]
+  }
+}
