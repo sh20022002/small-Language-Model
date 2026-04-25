@@ -61,7 +61,7 @@ def train_model(
     use_amp = device.type == "cuda"
     _major  = torch.cuda.get_device_capability()[0] if use_amp else 0
     amp_dtype = torch.bfloat16 if _major >= 8 else torch.float16
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp and amp_dtype == torch.float16)
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp and amp_dtype == torch.float16)
 
     train_losses, val_losses, val_accuracies = [], [], []
 
@@ -89,7 +89,7 @@ def train_model(
             attn   = batch["attention_mask"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
 
-            with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
+            with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                 logits = model(ids, attention_mask=attn)    # [B, T, V]
                 B, T, V = logits.shape
                 loss = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
@@ -120,7 +120,7 @@ def train_model(
                 attn   = batch["attention_mask"].to(device, non_blocking=True)
                 labels = batch["labels"].to(device, non_blocking=True)
 
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                     logits = model(ids, attention_mask=attn)
                     B, T, V = logits.shape
                     loss = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
