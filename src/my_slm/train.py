@@ -20,6 +20,18 @@ def get_cosine_schedule_with_warmup(optimizer, warmup_steps: int, total_steps: i
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def _repetition_ul_loss(logits, input_ids, labels, alpha):
+    """Unlikelihood loss: penalise predicting the immediately preceding token."""
+    B, T, V = logits.shape
+    if T < 2 or alpha == 0.0:
+        return logits.new_tensor(0.0)
+    probs  = torch.softmax(logits[:, 1:], dim=-1)                              # [B, T-1, V]
+    p_prev = probs.gather(-1, input_ids[:, :-1].unsqueeze(-1)).squeeze(-1)     # [B, T-1]
+    valid  = (labels[:, 1:] != -100).float()
+    ul     = -torch.log(1 - p_prev.clamp(max=1 - 1e-7)) * valid
+    return alpha * ul.sum() / valid.sum().clamp(min=1)
+
+
 def train_model(
     model,
     train_loader,
@@ -30,15 +42,26 @@ def train_model(
     ignore_index=-100,
     max_grad_norm=1.0,
     scheduler=None,
+    ul_alpha=0.1,
+    accumulation_steps=4,
 ):
     print('started Training...')
     device = torch.device(device) if isinstance(device, str) else device
     model.to(device)
     loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index)
 
-    # Mixed precision: on CUDA use float16; on CPU/MPS fall back to bfloat16 or disabled
-    use_amp = device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    # TF32 — free speedup on Ampere GPUs (A100, RTX 30xx); no-op on older GPUs
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+    # bfloat16 on capable hardware (A100+): more stable than float16, no scaler needed
+    # float16 on T4/V100: requires GradScaler to prevent underflow
+    use_amp  = device.type == "cuda"
+    amp_dtype = (torch.bfloat16
+                 if use_amp and torch.cuda.is_bf16_supported()
+                 else torch.float16)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp and amp_dtype == torch.float16)
 
     train_losses, val_losses, val_accuracies = [], [], []
 
@@ -59,28 +82,32 @@ def train_model(
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
+        optimizer.zero_grad(set_to_none=True)
 
-        for batch in train_loader:
+        for step, batch in enumerate(train_loader):
             ids    = batch["input_ids"].to(device, non_blocking=True)
             attn   = batch["attention_mask"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
 
-            optimizer.zero_grad(set_to_none=True)
-
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
                 logits = model(ids, attention_mask=attn)    # [B, T, V]
                 B, T, V = logits.shape
                 loss = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
+                loss = loss + _repetition_ul_loss(logits, ids, labels, ul_alpha)
+                loss = loss / accumulation_steps  # scale before backward
 
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            scaler.step(optimizer)
-            scaler.update()
-            if scheduler is not None:
-                scheduler.step()
+            total_loss += loss.detach().item() * accumulation_steps  # unscale for logging
 
-            total_loss += loss.detach().item()
+            is_last = (step + 1 == len(train_loader))
+            if (step + 1) % accumulation_steps == 0 or is_last:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                if scheduler is not None:
+                    scheduler.step()
 
         avg_train_loss = total_loss / max(1, len(train_loader))
         train_losses.append(avg_train_loss)

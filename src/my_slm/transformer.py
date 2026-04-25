@@ -81,15 +81,15 @@ class MultiHeadAttention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.0):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, hidden_dim, bias=False),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, dim, bias=False),
-        )
+        # SwiGLU: scale inner to 2/3 so total params ≈ standard FF (Phi, LLaMA)
+        inner = int(hidden_dim * 2 / 3)
+        self.gate  = nn.Linear(dim, inner, bias=False)
+        self.value = nn.Linear(dim, inner, bias=False)
+        self.proj  = nn.Linear(inner, dim, bias=False)
+        self.drop  = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.net(x)
+        return self.drop(self.proj(F.silu(self.gate(x)) * self.value(x)))
 
 
 class TransformerBlock(nn.Module):
@@ -111,6 +111,7 @@ class Transformer(nn.Module):
                  dropout=0.0, tie_weights=True, use_checkpoint=False):
         super().__init__()
         self.use_checkpoint = use_checkpoint
+        self.max_seq_len = window
         self.token_emb = nn.Embedding(vocab_size, dim)
         self.drop      = nn.Dropout(dropout)
         self.blocks    = nn.ModuleList([
@@ -150,7 +151,7 @@ class Transformer(nn.Module):
         x = self.norm(x)
         return self.to_logits(x)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def generate(
         self,
         x: torch.Tensor,
@@ -159,12 +160,14 @@ class Transformer(nn.Module):
         temperature: float = 0.8,
         top_k: int = 50,
         suppress_ids: list[int] | None = None,
+        repetition_penalty: float = 1.3,
     ) -> torch.Tensor:
         """
-        x              : [B, T] LongTensor of prompt token ids
-        temperature    : >1 = more random, <1 = more focused, 0 = greedy
-        top_k          : keep only top-k candidates before sampling (0 = disabled)
-        suppress_ids   : token ids to never generate (e.g. PAD, UNK)
+        x                  : [B, T] LongTensor of prompt token ids
+        temperature        : >1 = more random, <1 = more focused, 0 = greedy
+        top_k              : keep only top-k candidates before sampling (0 = disabled)
+        suppress_ids       : token ids to never generate (e.g. PAD, UNK)
+        repetition_penalty : >1 discourages repeating tokens already in context
         """
         self.eval()
         device     = next(self.parameters()).device
@@ -175,13 +178,21 @@ class Transformer(nn.Module):
             x_cond = x[:, -block_size:]
             logits = self(x_cond)[:, -1, :]  # [B, V]
 
+            # Penalise tokens already present in the context
+            if repetition_penalty != 1.0:
+                for b in range(x.shape[0]):
+                    seen = x[b].unique()
+                    score = logits[b, seen]
+                    logits[b, seen] = torch.where(
+                        score > 0, score / repetition_penalty, score * repetition_penalty
+                    )
+
             # Block special tokens so they are never sampled
             if suppress_ids:
                 for sid in suppress_ids:
                     logits[:, sid] = float('-inf')
 
             if temperature == 0:
-                # Greedy — deterministic, useful for debugging
                 next_token = logits.argmax(dim=-1, keepdim=True)
             else:
                 logits = logits / temperature
@@ -200,6 +211,12 @@ class Transformer(nn.Module):
                 break
 
         return x
+
+    def set_dropout(self, p: float):
+        """Update dropout probability in all layers; call before fine-tuning."""
+        for m in self.modules():
+            if isinstance(m, nn.Dropout):
+                m.p = p
 
     def resize_token_embeddings(self, new_size: int):
         old_emb = self.token_emb
