@@ -160,11 +160,18 @@ def train_across_datasets(
         if is_main:
             print(f"\n=== Stage: {name} | epochs={stage.epochs} | steps={stage.steps} ===")
 
-        train_stream, getter = get_hf_stream_and_text_getter(name)
-        val_stream, _        = get_hf_stream_and_text_getter(name)
-
-        train_ds = TextTokenDataset(train_stream, getter, tokenizer, max_len=max_len, max_items=train_items)
-        val_ds   = TextTokenDataset(val_stream,   getter, tokenizer, max_len=max_len, max_items=val_items)
+        # ── Dataset loading ───────────────────────────────────────────────────
+        try:
+            train_stream, getter = get_hf_stream_and_text_getter(name)
+            val_stream, _        = get_hf_stream_and_text_getter(name)
+            train_ds = TextTokenDataset(train_stream, getter, tokenizer, max_len=max_len, max_items=train_items)
+            val_ds   = TextTokenDataset(val_stream,   getter, tokenizer, max_len=max_len, max_items=val_items)
+        except Exception as e:
+            if is_main:
+                print(f"[Skip] Stage '{name}' failed to load — {type(e).__name__}: {e}")
+            if use_ddp:
+                accelerator.wait_for_everyone()
+            continue
 
         base_train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  collate_fn=collate, num_workers=0)
         val_loader        = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, collate_fn=collate, num_workers=0)
@@ -181,32 +188,40 @@ def train_across_datasets(
                 print(f"[Skip] Stage '{name}' has neither epochs nor steps > 0.")
             continue
 
-        if use_ddp:
-            model = train_model_accelerate(
-                model         = model,
-                train_loader  = train_loader,
-                val_loader    = val_loader,
-                optimizer     = optimizer,
-                accelerator   = accelerator,
-                epochs        = n_epochs,
-                max_grad_norm = max_grad_norm,
-                scheduler     = scheduler,
-                ul_alpha      = ul_alpha,
-            )
-        else:
-            model = train_model(
-                model              = model,
-                train_loader       = train_loader,
-                val_loader         = val_loader,
-                optimizer          = optimizer,
-                device             = device,
-                epochs             = n_epochs,
-                ignore_index       = -100,
-                max_grad_norm      = max_grad_norm,
-                scheduler          = scheduler,
-                ul_alpha           = ul_alpha,
-                accumulation_steps = accumulation_steps,
-            )
+        # ── Training ──────────────────────────────────────────────────────────
+        try:
+            if use_ddp:
+                model = train_model_accelerate(
+                    model         = model,
+                    train_loader  = train_loader,
+                    val_loader    = val_loader,
+                    optimizer     = optimizer,
+                    accelerator   = accelerator,
+                    epochs        = n_epochs,
+                    max_grad_norm = max_grad_norm,
+                    scheduler     = scheduler,
+                    ul_alpha      = ul_alpha,
+                )
+            else:
+                model = train_model(
+                    model              = model,
+                    train_loader       = train_loader,
+                    val_loader         = val_loader,
+                    optimizer          = optimizer,
+                    device             = device,
+                    epochs             = n_epochs,
+                    ignore_index       = -100,
+                    max_grad_norm      = max_grad_norm,
+                    scheduler          = scheduler,
+                    ul_alpha           = ul_alpha,
+                    accumulation_steps = accumulation_steps,
+                )
+        except Exception as e:
+            if is_main:
+                print(f"[Skip] Stage '{name}' training failed — {type(e).__name__}: {e}")
+            if use_ddp:
+                accelerator.wait_for_everyone()
+            continue
 
         if is_main:
             ckpt_path = Path(save_dir) / f"{stage.name}_stage.pt"
