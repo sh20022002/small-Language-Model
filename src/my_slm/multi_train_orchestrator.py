@@ -46,9 +46,14 @@ def _encode(tokenizer, text: str, max_len: int | None = None) -> list:
     """Encode text with either HybridTokenizer or a HuggingFace tokenizer."""
     if hasattr(tokenizer, "token2id"):
         ids = tokenizer.encode(text, mode="flat")           # HybridTokenizer
+        return ids[:max_len] if max_len else ids
     else:
-        ids = tokenizer.encode(text, add_special_tokens=False)  # HF tokenizer
-    return ids[:max_len] if max_len else ids
+        # Pass truncation to the HF tokenizer so it never warns about length
+        kwargs = {"add_special_tokens": False}
+        if max_len:
+            kwargs["truncation"] = True
+            kwargs["max_length"] = max_len
+        return tokenizer.encode(text, **kwargs)
 
 
 class TextTokenDataset(Dataset):
