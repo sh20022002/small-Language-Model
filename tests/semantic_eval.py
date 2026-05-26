@@ -503,27 +503,73 @@ def print_report(report: dict) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_model_and_tok(model_path: str, tok_path: str, device: torch.device):
-    """Load model and tokenizer from checkpoint files."""
+    """
+    Load model and tokenizer from checkpoint files.
+
+    Checkpoint formats supported:
+      • {'config': {...}, 'model_state': state_dict}   (new format, saved by Kaggle notebook)
+      • plain state_dict                                (legacy — requires --config flag or
+                                                         that Transformer args match defaults)
+    tok_path can be:
+      • path to a HybridTokenizer .pkl.gz file
+      • a HuggingFace tokenizer name/path (e.g. 'gpt2')
+    """
     sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
     from my_slm.transformer import Transformer
-    from my_slm.hybrid_tokeniztion import HybridTokenizer
 
-    # Load tokenizer
-    tok = HybridTokenizer.load(tok_path)
-    print(f'Tokenizer loaded  |  vocab_size={tok.vocab_size:,}')
+    # ── Tokenizer ─────────────────────────────────────────────────────────────
+    if tok_path.endswith('.pkl.gz') or tok_path.endswith('.pkl'):
+        from my_slm.hybrid_tokeniztion import HybridTokenizer
+        tok = HybridTokenizer.load(tok_path)
+        vocab_size = tok.vocab_size
+        print(f'Tokenizer loaded  |  HybridTokenizer  vocab={vocab_size:,}')
+    else:
+        try:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(tok_path)
+            if tok.pad_token is None:
+                tok.pad_token = tok.eos_token
+            vocab_size = len(tok)
+            print(f'Tokenizer loaded  |  HuggingFace ({tok_path})  vocab={vocab_size:,}')
+        except Exception as e:
+            raise ValueError(f"Cannot load tokenizer from '{tok_path}': {e}") from e
 
-    # Load model
-    ckpt   = torch.load(model_path, map_location=device)
-    cfg    = ckpt['config']
-    model  = Transformer(
-        vocab_size=cfg['vocab_size'],
-        dim=cfg['dim'],
-        depth=cfg['depth'],
-        heads=cfg['heads'],
-        mlp_dim=cfg['mlp_dim'],
-        window=cfg['window'],
+    # ── Model checkpoint ──────────────────────────────────────────────────────
+    ckpt = torch.load(model_path, map_location=device)
+
+    if isinstance(ckpt, dict) and 'config' in ckpt:
+        # New format: {'config': {...}, 'model_state': state_dict}
+        cfg        = ckpt['config']
+        state_dict = ckpt['model_state']
+    else:
+        # Legacy: plain state_dict — infer vocab_size from embedding weight
+        state_dict = ckpt
+        emb_shape  = state_dict.get('token_emb.weight', next(iter(state_dict.values()))).shape
+        cfg = {
+            'vocab_size': emb_shape[0],
+            'dim':        emb_shape[1],
+            'depth':      sum(1 for k in state_dict if k.endswith('.attn.qkv.weight')),
+        }
+        # Infer heads/mlp_dim from weight shapes
+        qkv_key = next(k for k in state_dict if k.endswith('.attn.qkv.weight'))
+        cfg['heads']   = state_dict.get('blocks.0.attn._rope_sin',
+                                        torch.zeros(1, 4, 1, 1)).shape[1]
+        cfg['mlp_dim'] = int(state_dict[qkv_key].shape[0] / 3 / cfg['dim']
+                             * cfg['dim'] * 1.5)   # rough estimate
+        cfg['window']  = state_dict.get('blocks.0.attn._rope_sin',
+                                        torch.zeros(1, 1, 512, 1)).shape[2]
+        print('WARNING: legacy checkpoint — model config inferred from weights; '
+              'verify output is sensible.')
+
+    model = Transformer(
+        vocab_size = cfg.get('vocab_size', vocab_size),
+        dim        = cfg['dim'],
+        depth      = cfg['depth'],
+        heads      = cfg['heads'],
+        mlp_dim    = cfg['mlp_dim'],
+        window     = cfg['window'],
     ).to(device)
-    model.load_state_dict(ckpt['model_state'])
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
 
     params = sum(p.numel() for p in model.parameters())

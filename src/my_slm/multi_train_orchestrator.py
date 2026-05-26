@@ -47,14 +47,23 @@ def get_hf_stream_and_text_getter(name: str):
         raise ValueError(f"Unknown dataset {name}. Choose: wikitext, tinystories, openwebtext, alpaca.")
     return ds, getter
 
+def _encode(tokenizer, text: str, max_len: int | None = None) -> list:
+    """Encode text with either HybridTokenizer or a HuggingFace tokenizer."""
+    if hasattr(tokenizer, "token2id"):
+        ids = tokenizer.encode(text, mode="flat")           # HybridTokenizer
+    else:
+        ids = tokenizer.encode(text, add_special_tokens=False)  # HF tokenizer
+    return ids[:max_len] if max_len else ids
+
+
 class TextTokenDataset(Dataset):
     """Materializes a small list of token ID tensors for simple training on Colab."""
-    def __init__(self, hf_stream, get_text, tokenizer: HybridTokenizer, max_len: int, max_items: Optional[int] = None):
+    def __init__(self, hf_stream, get_text, tokenizer, max_len: int, max_items: Optional[int] = None):
         self.samples: List[torch.Tensor] = []
         n = 0
         for ex in hf_stream:
             text = get_text(ex)
-            ids = tokenizer.encode(text, mode="flat")[:max_len]
+            ids = _encode(tokenizer, text)[:max_len]
             if ids:
                 self.samples.append(torch.tensor(ids, dtype=torch.long))
                 n += 1
@@ -100,11 +109,20 @@ class StageConfig:
     epochs: int = 0
     steps: int = 0  # if >0, we train only this many steps for the stage
 
+def _get_pad_id(tokenizer) -> int:
+    """Return pad token id for HybridTokenizer or HuggingFace tokenizer."""
+    if hasattr(tokenizer, "token2id"):
+        return tokenizer.token2id.get("<PAD>", 0)
+    if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
+        return tokenizer.pad_token_id
+    return 0
+
+
 def train_across_datasets(
     *,
     model,                          # <-- you pass an initialized model
     optimizer,                      # <-- you pass an initialized optimizer
-    tokenizer: HybridTokenizer,     # <-- you pass an initialized tokenizer
+    tokenizer,                      # <-- HybridTokenizer or HuggingFace tokenizer
     device: Optional[str] = None,   # "cuda" / "cpu" — auto-detected if None
     epochs: int = 3,
     stages: Iterable[StageConfig] = (
@@ -131,7 +149,7 @@ def train_across_datasets(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    pad_id = tokenizer.token2id["<PAD>"]
+    pad_id = _get_pad_id(tokenizer)
 
     for stage in stages:
         name = stage.name.lower()

@@ -24,6 +24,7 @@ from my_slm.train import (
     QADataset,
     train_model,
 )
+from my_slm.multi_train_orchestrator import _encode, _get_pad_id
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -520,7 +521,7 @@ def check_trained_model(model, tok, device, vocab_size: int, pad_id: int) -> boo
         "Neural networks learn representations from data.",
         "Water boils at one hundred degrees Celsius.",
     ]
-    enc   = [tok.encode(t, max_length=64, truncation=True) for t in sample_texts]
+    enc   = [_encode(tok, t, max_len=64) for t in sample_texts]
     maxT  = max(len(e) for e in enc)
     B     = len(enc)
     ids   = torch.zeros(B, maxT, dtype=torch.long, device=device)
@@ -561,7 +562,7 @@ def check_trained_model(model, tok, device, vocab_size: int, pad_id: int) -> boo
     ok &= _check(torch.allclose(la[0, :-1], lb[0, :-1], atol=1e-4),
                  "Causal masking still intact after training")
 
-    prompt_enc = tok.encode("The capital of France is", add_special_tokens=False)[:16]
+    prompt_enc = _encode(tok, "The capital of France is", max_len=16)
     prompt_t   = torch.tensor(prompt_enc, dtype=torch.long, device=device).unsqueeze(0)
     plen       = prompt_t.shape[1]
     gen        = base.generate(prompt_t, max_new_tokens=20, temperature=0.8,
@@ -580,7 +581,11 @@ def check_trained_model(model, tok, device, vocab_size: int, pad_id: int) -> boo
     improvement = (log_v - loss) / log_v * 100
     print(f"\n  Loss vs random: {log_v:.3f} → {loss:.3f}"
           f"  ({improvement:+.1f}% {'better' if improvement > 0 else 'worse'})")
-    gen_text = tok.decode(gen_toks, skip_special_tokens=True)
+    from my_slm.multi_train_orchestrator import _encode as _enc  # noqa: F401
+    if hasattr(tok, 'token2id'):
+        gen_text = tok.decode(gen_toks)
+    else:
+        gen_text = tok.decode(gen_toks, skip_special_tokens=True)
     print(f"  'The capital of France is' → '{gen_text.strip()}'")
     print()
     return ok

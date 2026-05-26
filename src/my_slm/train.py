@@ -32,6 +32,46 @@ def _repetition_ul_loss(logits, input_ids, labels, alpha):
     return alpha * ul.sum() / valid.sum().clamp(min=1)
 
 
+def make_optimizer(
+    model,
+    lr: float,
+    weight_decay: float = 0.1,
+    betas: tuple = (0.9, 0.95),
+    use_8bit: bool = False,
+):
+    """
+    Build AdamW with GPT-style weight-decay groups:
+      - decay   : all 2-D weight matrices in Linear layers
+      - no-decay : 1-D params (biases, RMSNorm.weight) and embeddings
+
+    use_8bit=True uses bitsandbytes AdamW8bit (pip install bitsandbytes).
+    Recommended for Kaggle / Colab to shrink optimizer state by ~8×.
+    """
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        # Embedding weights are 2-D but should not be decayed (lookup tables)
+        if param.ndim >= 2 and 'token_emb' not in name:
+            decay.append(param)
+        else:
+            no_decay.append(param)
+
+    groups = [
+        {'params': decay,    'weight_decay': weight_decay},
+        {'params': no_decay, 'weight_decay': 0.0},
+    ]
+
+    if use_8bit:
+        try:
+            import bitsandbytes as bnb
+            return bnb.optim.AdamW8bit(groups, lr=lr, betas=betas)
+        except ImportError as exc:
+            raise ImportError("pip install bitsandbytes to use use_8bit=True") from exc
+
+    return torch.optim.AdamW(groups, lr=lr, betas=betas)
+
+
 def train_model(
     model,
     train_loader,
@@ -151,6 +191,109 @@ def train_model(
 
     return model
 
+
+
+def train_model_accelerate(
+    model,
+    train_loader,
+    val_loader,
+    optimizer,
+    accelerator,
+    epochs=5,
+    ignore_index=-100,
+    max_grad_norm=1.0,
+    scheduler=None,
+    ul_alpha=0.1,
+):
+    """
+    Drop-in replacement for train_model that uses HuggingFace Accelerate.
+
+    Prerequisites (caller's responsibility):
+        accelerator = Accelerator(mixed_precision="fp16",
+                                  gradient_accumulation_steps=N)
+        model, optimizer, train_loader, val_loader = accelerator.prepare(
+            model, optimizer, train_loader, val_loader)
+
+    Differences from train_model:
+      - No device arg; Accelerator handles placement.
+      - No GradScaler; Accelerator handles mixed-precision.
+      - accelerator.accumulate() drives gradient accumulation.
+      - Only the main process prints and plots.
+    """
+    is_main = accelerator.is_main_process
+    loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index)
+
+    if is_main:
+        print("Started Training (Accelerate / DDP) …")
+
+    train_losses, val_losses, val_accuracies = [], [], []
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = torch.tensor(0.0, device=accelerator.device)
+
+        for batch in train_loader:
+            ids    = batch["input_ids"]
+            attn   = batch["attention_mask"]
+            labels = batch["labels"]
+
+            with accelerator.accumulate(model):
+                logits = model(ids, attention_mask=attn)
+                B, T, V = logits.shape
+                loss = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
+                loss = loss + _repetition_ul_loss(logits, ids, labels, ul_alpha)
+                accelerator.backward(loss)
+
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
+
+                optimizer.step()
+                if scheduler is not None and accelerator.sync_gradients:
+                    scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+
+            total_loss += loss.detach()
+
+        # Aggregate loss across all processes
+        total_loss = accelerator.reduce(total_loss, reduction="mean")
+        avg_train_loss = total_loss.item() / max(1, len(train_loader))
+        train_losses.append(avg_train_loss)
+
+        model.eval()
+        val_loss, correct, total = 0.0, 0, 0
+        with torch.no_grad():
+            for batch in val_loader:
+                ids    = batch["input_ids"]
+                attn   = batch["attention_mask"]
+                labels = batch["labels"]
+
+                logits = model(ids, attention_mask=attn)
+                B, T, V = logits.shape
+                l = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
+                val_loss += l.detach().item()
+
+                pred = logits.argmax(dim=-1)
+                mask = labels != ignore_index
+                correct += (pred[mask] == labels[mask]).sum().item()
+                total   += mask.sum().item()
+
+        avg_val_loss = val_loss / max(1, len(val_loader))
+        accuracy     = (correct / max(total, 1)) * 100.0
+        val_losses.append(avg_val_loss)
+        val_accuracies.append(accuracy)
+
+        if is_main:
+            print(f"Epoch {epoch+1}/{epochs} — Train Loss: {avg_train_loss:.4f}, "
+                  f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%")
+
+    if is_main:
+        plt.figure(figsize=(6, 4))
+        plt.plot(train_losses, label="Train Loss")
+        plt.plot(val_losses,   label="Val Loss")
+        plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend(); plt.tight_layout()
+        plt.show()
+
+    return model
 
 
 class QADataset(Dataset):
