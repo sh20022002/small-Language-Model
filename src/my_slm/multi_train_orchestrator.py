@@ -6,11 +6,6 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
-try:
-    from datasets import load_dataset
-except Exception as e:
-    raise SystemExit("Please: pip install datasets") from e
-
 from my_slm.train import train_model, train_model_accelerate
 
 # -----------------------------
@@ -18,6 +13,10 @@ from my_slm.train import train_model, train_model_accelerate
 # -----------------------------
 
 def get_hf_stream_and_text_getter(name: str):
+    try:
+        from datasets import load_dataset
+    except ImportError as e:
+        raise ImportError("pip install datasets") from e
     name = name.lower()
     if name == "wikitext":
         ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
