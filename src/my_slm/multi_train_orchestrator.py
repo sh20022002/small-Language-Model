@@ -59,17 +59,29 @@ def get_hf_val_stream_and_getter(name: str, skip_after: int = 0):
     return get_hf_stream_and_text_getter(name, split="train", skip=skip_after)
 
 def _encode(tokenizer, text: str, max_len: int | None = None) -> list:
-    """Encode text with either HybridTokenizer or a HuggingFace tokenizer."""
+    """Encode text with either HybridTokenizer or a HuggingFace tokenizer.
+
+    Appends EOS to every sequence so the model learns when to stop generating.
+    max_len reserves one slot for EOS, keeping total length within the window.
+    """
     if hasattr(tokenizer, "token2id"):
-        ids = tokenizer.encode(text, mode="flat")           # HybridTokenizer
-        return ids[:max_len] if max_len else ids
+        ids = tokenizer.encode(text, mode="flat")
+        eos = tokenizer.token2id.get("<EOS>") or tokenizer.token2id.get("<PAD>")
+        if max_len:
+            ids = ids[: max_len - 1]
+        if eos is not None:
+            ids = ids + [eos]
+        return ids
     else:
-        # Pass truncation to the HF tokenizer so it never warns about length
         kwargs = {"add_special_tokens": False}
         if max_len:
             kwargs["truncation"] = True
-            kwargs["max_length"] = max_len
-        return tokenizer.encode(text, **kwargs)
+            kwargs["max_length"] = max_len - 1   # leave room for EOS
+        ids = tokenizer.encode(text, **kwargs)
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_id is not None:
+            ids = ids + [eos_id]
+        return ids
 
 
 class TextTokenDataset(Dataset):
@@ -79,7 +91,7 @@ class TextTokenDataset(Dataset):
         n = 0
         for ex in hf_stream:
             text = get_text(ex)
-            ids = _encode(tokenizer, text)[:max_len]
+            ids = _encode(tokenizer, text, max_len=max_len)
             if ids:
                 self.samples.append(torch.tensor(ids, dtype=torch.long))
                 n += 1
@@ -172,6 +184,11 @@ def train_across_datasets(
     Path(save_dir).mkdir(parents=True, exist_ok=True)
     if not use_ddp and device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Override the HF tokenizer's built-in model_max_length (GPT-2 defaults to 1024)
+    # so it doesn't warn when sequences are longer than that but still within our window.
+    if not hasattr(tokenizer, "token2id") and hasattr(tokenizer, "model_max_length"):
+        tokenizer.model_max_length = max_len
 
     pad_id = _get_pad_id(tokenizer)
     collate = make_collate(pad_id=pad_id, ignore_index=-100)
