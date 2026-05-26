@@ -150,21 +150,11 @@ def _train_fn():
     import torch
     from accelerate import Accelerator
     from accelerate.utils import set_seed
-    from torch.utils.data import DataLoader
 
     # ── Project imports ───────────────────────────────────────────────────────
     from my_slm.transformer import Transformer
-    from my_slm.train import (
-        make_optimizer,
-        get_cosine_schedule_with_warmup,
-        train_model_accelerate,
-    )
-    from my_slm.multi_train_orchestrator import (
-        get_hf_stream_and_text_getter,
-        TextTokenDataset,
-        make_collate,
-        _get_pad_id,
-    )
+    from my_slm.train import make_optimizer, get_cosine_schedule_with_warmup
+    from my_slm.multi_train_orchestrator import StageConfig, train_across_datasets
     from my_slm.hybrid_tokeniztion import HybridTokenizer
 
     # ── Accelerator ───────────────────────────────────────────────────────────
@@ -215,7 +205,6 @@ def _train_fn():
 
     vocab_size = (tokenizer.vocab_size
                   if hasattr(tokenizer, "vocab_size") else len(tokenizer))
-    pad_id = _get_pad_id(tokenizer)
 
     # ── Model ─────────────────────────────────────────────────────────────────
     model = Transformer(
@@ -302,54 +291,27 @@ def _train_fn():
 
     global_step = _resume()
 
-    # ── Multi-stage training loop ─────────────────────────────────────────────
-    collate = make_collate(pad_id=pad_id, ignore_index=-100)
+    # ── Multi-stage curriculum training (via orchestrator) ────────────────────
+    stages = [StageConfig(name, steps=steps) for name, steps in STAGES]
 
-    for stage_name, stage_steps in STAGES:
-        if is_main:
-            print(f"\n{'='*60}\n  Stage: {stage_name}  |  steps={stage_steps}\n{'='*60}")
+    model = train_across_datasets(
+        model              = model,
+        optimizer          = optimizer,
+        tokenizer          = tokenizer,
+        accelerator        = accelerator,
+        stages             = stages,
+        max_len            = MODEL_CFG["window"],
+        train_items        = MAX_ITEMS_TRAIN,
+        val_items          = MAX_ITEMS_VAL,
+        batch_size         = BATCH_SIZE,
+        scheduler          = scheduler,
+        max_grad_norm      = MAX_GRAD_NORM,
+        ul_alpha           = UL_ALPHA,
+        save_dir           = OUTPUT_DIR,
+    )
 
-        train_stream, getter = get_hf_stream_and_text_getter(stage_name)
-        val_stream,   _      = get_hf_stream_and_text_getter(stage_name)
-
-        train_ds = TextTokenDataset(
-            train_stream, getter, tokenizer,
-            MODEL_CFG["window"], MAX_ITEMS_TRAIN,
-        )
-        val_ds = TextTokenDataset(
-            val_stream, getter, tokenizer,
-            MODEL_CFG["window"], MAX_ITEMS_VAL,
-        )
-
-        train_loader = DataLoader(
-            train_ds, batch_size=BATCH_SIZE, shuffle=True,
-            collate_fn=collate, num_workers=0,
-        )
-        val_loader = DataLoader(
-            val_ds, batch_size=BATCH_SIZE, shuffle=False,
-            collate_fn=collate, num_workers=0,
-        )
-        train_loader, val_loader = accelerator.prepare(train_loader, val_loader)
-
-        # Limit to stage_steps batches (step-based curriculum)
-        from my_slm.multi_train_orchestrator import SliceLoader
-        sliced = SliceLoader(train_loader, max_batches=stage_steps)
-
-        model = train_model_accelerate(
-            model         = model,
-            train_loader  = sliced,
-            val_loader    = val_loader,
-            optimizer     = optimizer,
-            accelerator   = accelerator,
-            epochs        = 1,
-            max_grad_norm = MAX_GRAD_NORM,
-            scheduler     = scheduler,
-            ul_alpha      = UL_ALPHA,
-        )
-
-        global_step += math.ceil(stage_steps / GRAD_ACCUM)
-        accelerator.wait_for_everyone()
-        _save(global_step)
+    global_step += sum(math.ceil(steps / GRAD_ACCUM) for _, steps in STAGES)
+    _save(global_step)
 
     # ── Final weights ─────────────────────────────────────────────────────────
     accelerator.wait_for_everyone()

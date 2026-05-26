@@ -1,21 +1,17 @@
-# multi_train_steps.py
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Dict
+from typing import Iterable, List, Optional
 from pathlib import Path
 import itertools
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
-# External datasets
 try:
     from datasets import load_dataset
 except Exception as e:
     raise SystemExit("Please: pip install datasets") from e
 
-# Your package (we don't init model/tokenizer here)
-from my_slm.hybrid_tokeniztion import HybridTokenizer
-from my_slm.train import train_model  # your existing trainer (epoch-based)
+from my_slm.train import train_model, train_model_accelerate
 
 # -----------------------------
 # Dataset helpers
@@ -120,11 +116,11 @@ def _get_pad_id(tokenizer) -> int:
 
 def train_across_datasets(
     *,
-    model,                          # <-- you pass an initialized model
-    optimizer,                      # <-- you pass an initialized optimizer
-    tokenizer,                      # <-- HybridTokenizer or HuggingFace tokenizer
-    device: Optional[str] = None,   # "cuda" / "cpu" — auto-detected if None
-    epochs: int = 3,
+    model,
+    optimizer,
+    tokenizer,
+    accelerator=None,               # pass an Accelerator for DDP/multi-GPU (like the notebook)
+    device: Optional[str] = None,   # used only when accelerator is None
     stages: Iterable[StageConfig] = (
         StageConfig("tinystories", steps=1000),
         StageConfig("wikitext",   steps=2000),
@@ -132,69 +128,94 @@ def train_across_datasets(
         StageConfig("alpaca",     steps=1000),
     ),
     max_len: int = 256,
-    train_items: int = 50_000,      # cap materialized items per stage (for Colab)
+    train_items: int = 50_000,
     val_items: int = 2_000,
     batch_size: int = 32,
+    scheduler=None,
+    max_grad_norm: float = 1.0,
+    ul_alpha: float = 0.1,
+    accumulation_steps: int = 4,    # used only in single-GPU path
     save_dir: str = "./out",
-) -> None:
+):
     """
-    Train an existing model/optimizer over multiple datasets.
-    You can choose epoch-based or step-based per stage:
-      - If stage.steps > 0  -> train exactly that many batches (one "micro-epoch")
-      - Else if stage.epochs > 0 -> use your `train_model` for full epochs
+    Multi-stage curriculum training over HuggingFace datasets.
 
-    This function DOES NOT initialize model/tokenizer/optimizer.
+    Two modes (automatically selected):
+      accelerator is not None → DDP path  (mirrors notebook _train_fn, uses train_model_accelerate)
+      accelerator is None     → single-GPU path (uses train_model with AMP + grad accumulation)
+
+    Per-stage choice: stage.steps > 0 → step-based; stage.epochs > 0 → epoch-based.
     """
+    use_ddp = accelerator is not None
+    is_main = (not use_ddp) or accelerator.is_main_process
+
     Path(save_dir).mkdir(parents=True, exist_ok=True)
-    if device is None:
+    if not use_ddp and device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     pad_id = _get_pad_id(tokenizer)
+    collate = make_collate(pad_id=pad_id, ignore_index=-100)
 
     for stage in stages:
         name = stage.name.lower()
-        print(f"\n=== Stage: {name} | epochs={stage.epochs} | steps={stage.steps} ===")
+        if is_main:
+            print(f"\n=== Stage: {name} | epochs={stage.epochs} | steps={stage.steps} ===")
 
-        # Build datasets & loaders
         train_stream, getter = get_hf_stream_and_text_getter(name)
         val_stream, _        = get_hf_stream_and_text_getter(name)
 
         train_ds = TextTokenDataset(train_stream, getter, tokenizer, max_len=max_len, max_items=train_items)
         val_ds   = TextTokenDataset(val_stream,   getter, tokenizer, max_len=max_len, max_items=val_items)
 
-        collate = make_collate(pad_id=pad_id, ignore_index=-100)
         base_train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  collate_fn=collate, num_workers=0)
         val_loader        = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, collate_fn=collate, num_workers=0)
 
-        # ---- Option A: STEP-BASED training (limit number of batches) ----
-        if stage.steps and stage.steps > 0:
-            train_loader = SliceLoader(base_train_loader, max_batches=stage.steps)
-            model = train_model(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                optimizer=optimizer,
-                device=device,
-                epochs=1,   # one pass over the sliced loader = exactly `steps` batches
-                ignore_index=-100,
-            )
-        # ---- Option B: EPOCH-BASED training (full passes over dataset) ----
-        elif stage.epochs and stage.epochs > 0:
-            model = train_model(
-                model=model,
-                train_loader=base_train_loader,
-                val_loader=val_loader,
-                optimizer=optimizer,
-                device=device,
-                epochs=stage.epochs,
-                ignore_index=-100,
+        # DDP path: let Accelerator distribute the loaders
+        if use_ddp:
+            base_train_loader, val_loader = accelerator.prepare(base_train_loader, val_loader)
+
+        n_epochs = 1 if stage.steps > 0 else max(stage.epochs, 1)
+        train_loader = SliceLoader(base_train_loader, stage.steps) if stage.steps > 0 else base_train_loader
+
+        if n_epochs == 0:
+            if is_main:
+                print(f"[Skip] Stage '{name}' has neither epochs nor steps > 0.")
+            continue
+
+        if use_ddp:
+            model = train_model_accelerate(
+                model         = model,
+                train_loader  = train_loader,
+                val_loader    = val_loader,
+                optimizer     = optimizer,
+                accelerator   = accelerator,
+                epochs        = n_epochs,
+                max_grad_norm = max_grad_norm,
+                scheduler     = scheduler,
+                ul_alpha      = ul_alpha,
             )
         else:
-            print(f"[Skip] Stage '{name}' has neither epochs nor steps > 0.")
+            model = train_model(
+                model              = model,
+                train_loader       = train_loader,
+                val_loader         = val_loader,
+                optimizer          = optimizer,
+                device             = device,
+                epochs             = n_epochs,
+                ignore_index       = -100,
+                max_grad_norm      = max_grad_norm,
+                scheduler          = scheduler,
+                ul_alpha           = ul_alpha,
+                accumulation_steps = accumulation_steps,
+            )
 
-        # Save per-stage checkpoint (optional)
-        ckpt_path = Path(save_dir) / f"{stage.name}_stage.pt"
-        torch.save({"model": model.state_dict()}, ckpt_path)
-        print(f"[Checkpoint] Saved {ckpt_path}")
+        if is_main:
+            ckpt_path = Path(save_dir) / f"{stage.name}_stage.pt"
+            unwrapped = accelerator.unwrap_model(model) if use_ddp else model
+            torch.save({"config": {}, "model_state": unwrapped.state_dict()}, ckpt_path)
+            print(f"[Checkpoint] Saved {ckpt_path}")
+
+        if use_ddp:
+            accelerator.wait_for_everyone()
 
     return model
