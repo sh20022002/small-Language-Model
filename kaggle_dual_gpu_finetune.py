@@ -56,19 +56,31 @@ if REPO_ROOT:
         if p not in sys.path:
             sys.path.insert(0, p)
 
-import torch
+# ── GPU info via nvidia-smi (no torch.cuda — keeps CUDA uninitialised so
+#    notebook_launcher can use fork/spawn without hitting the
+#    "Cannot re-initialize CUDA in forked subprocess" error) ──────────────────
+import subprocess
 
-n_gpus = torch.cuda.device_count()
-print(f"GPUs available: {n_gpus}")
-for i in range(n_gpus):
-    p = torch.cuda.get_device_properties(i)
-    print(f"  cuda:{i}  {p.name}  {p.total_memory / 1e9:.1f} GB")
+try:
+    _smi = subprocess.run(
+        ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+        capture_output=True, text=True, timeout=10,
+    )
+    _gpu_lines = [l.strip() for l in _smi.stdout.strip().split("\n") if l.strip()]
+    n_gpus = len(_gpu_lines)
+    print(f"GPUs available: {n_gpus}")
+    for i, line in enumerate(_gpu_lines):
+        name, mem = line.split(",")
+        print(f"  cuda:{i}  {name.strip()}  {float(mem.split()[0]) / 1024:.1f} GB")
+except Exception as _e:
+    print(f"[nvidia-smi] {_e}")
+    n_gpus = 0
 
 if n_gpus < 2:
     print("\nWARNING: fewer than 2 GPUs found — "
           "enable 'GPU T4 x2' in Kaggle Settings → Accelerator.")
 
-# Compute benchmark (fp32 TFLOPS + MFU) — uses tests/mfu.py from the project
+# Compute benchmark — uses tests/mfu.py from the project
 try:
     from mfu import run_perf_and_mfu
     if n_gpus >= 1:
@@ -334,7 +346,7 @@ from accelerate import notebook_launcher
 
 notebook_launcher(
     _train_fn,
-    num_processes  = torch.cuda.device_count(),   # 2 on T4×2, 1 on single GPU
+    num_processes  = n_gpus or 2,   # from nvidia-smi; fallback 2 for T4×2
     mixed_precision= "fp16",
 )
 
