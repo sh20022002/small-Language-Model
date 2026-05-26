@@ -21,13 +21,17 @@ def get_cosine_schedule_with_warmup(optimizer, warmup_steps: int, total_steps: i
 
 
 def _repetition_ul_loss(logits, input_ids, labels, alpha):
-    """Unlikelihood loss: penalise predicting the immediately preceding token."""
+    """Unlikelihood loss on shifted logits: discourage predicting the immediately preceding token."""
     B, T, V = logits.shape
     if T < 2 or alpha == 0.0:
         return logits.new_tensor(0.0)
-    probs  = torch.softmax(logits[:, 1:], dim=-1)                              # [B, T-1, V]
-    p_prev = probs.gather(-1, input_ids[:, :-1].unsqueeze(-1)).squeeze(-1)     # [B, T-1]
-    valid  = (labels[:, 1:] != -100).float()
+    # logits[:, t] predicts ids[:, t+1]; at each prediction step t, penalise P(ids[:, t])
+    shift_logits = logits[:, :-1]                                               # [B, T-1, V]
+    prev_ids     = input_ids[:, :-1]                                            # [B, T-1]
+    shift_labels = labels[:, 1:]                                                # [B, T-1]
+    probs  = torch.softmax(shift_logits, dim=-1)
+    p_prev = probs.gather(-1, prev_ids.unsqueeze(-1)).squeeze(-1)              # [B, T-1]
+    valid  = (shift_labels != -100).float()
     ul     = -torch.log(1 - p_prev.clamp(max=1 - 1e-7)) * valid
     return alpha * ul.sum() / valid.sum().clamp(min=1)
 
@@ -132,7 +136,9 @@ def train_model(
             with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                 logits = model(ids, attention_mask=attn)    # [B, T, V]
                 B, T, V = logits.shape
-                loss = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
+                # Shift: logits[t] predicts ids[t+1]
+                loss = loss_fn(logits[:, :-1].reshape(B * (T - 1), V),
+                               labels[:, 1:].reshape(B * (T - 1)))
                 loss = loss + _repetition_ul_loss(logits, ids, labels, ul_alpha)
                 loss = loss / accumulation_steps  # scale before backward
 
@@ -163,13 +169,15 @@ def train_model(
                 with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                     logits = model(ids, attention_mask=attn)
                     B, T, V = logits.shape
-                    loss = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
+                    shift_logits = logits[:, :-1].reshape(B * (T - 1), V)
+                    shift_labels = labels[:, 1:].reshape(B * (T - 1))
+                    loss = loss_fn(shift_logits, shift_labels)
 
                 val_loss += loss.detach().item()
 
-                pred = logits.argmax(dim=-1)
-                mask = labels != ignore_index
-                correct += (pred[mask] == labels[mask]).sum().item()
+                pred = logits[:, :-1].argmax(dim=-1)
+                mask = labels[:, 1:] != ignore_index
+                correct += (pred[mask] == labels[:, 1:][mask]).sum().item()
                 total   += mask.sum().item()
 
         avg_val_loss = val_loss / max(1, len(val_loader))
@@ -240,7 +248,9 @@ def train_model_accelerate(
             with accelerator.accumulate(model):
                 logits = model(ids, attention_mask=attn)
                 B, T, V = logits.shape
-                loss = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
+                # Shift: logits[t] predicts ids[t+1]
+                loss = loss_fn(logits[:, :-1].reshape(B * (T - 1), V),
+                               labels[:, 1:].reshape(B * (T - 1)))
                 loss = loss + _repetition_ul_loss(logits, ids, labels, ul_alpha)
                 accelerator.backward(loss)
 
@@ -269,12 +279,14 @@ def train_model_accelerate(
 
                 logits = model(ids, attention_mask=attn)
                 B, T, V = logits.shape
-                l = loss_fn(logits.reshape(B * T, V), labels.reshape(B * T))
+                shift_logits = logits[:, :-1].reshape(B * (T - 1), V)
+                shift_labels = labels[:, 1:].reshape(B * (T - 1))
+                l = loss_fn(shift_logits, shift_labels)
                 val_loss += l.detach().item()
 
-                pred = logits.argmax(dim=-1)
-                mask = labels != ignore_index
-                correct += (pred[mask] == labels[mask]).sum().item()
+                pred = logits[:, :-1].argmax(dim=-1)
+                mask = labels[:, 1:] != ignore_index
+                correct += (pred[mask] == labels[:, 1:][mask]).sum().item()
                 total   += mask.sum().item()
 
         avg_val_loss = val_loss / max(1, len(val_loader))

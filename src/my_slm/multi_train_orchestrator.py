@@ -12,35 +12,51 @@ from my_slm.train import train_model, train_model_accelerate
 # Dataset helpers
 # -----------------------------
 
-def get_hf_stream_and_text_getter(name: str):
+def _alpaca_getter(ex):
+    ins = ex.get("instruction") or ""
+    inp = ex.get("input") or ""
+    out = ex.get("output") or ""
+    if inp:
+        return f"### Instruction:\n{ins}\n\n### Input:\n{inp}\n\n### Response:\n{out}\n"
+    return f"### Instruction:\n{ins}\n\n### Response:\n{out}\n"
+
+
+def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0):
     try:
         from datasets import load_dataset
     except ImportError as e:
         raise ImportError("pip install datasets") from e
     name = name.lower()
     if name == "wikitext":
-        ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
+        ds = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split=split, streaming=True)
         getter = lambda ex: ex.get("text") or ""
     elif name == "tinystories":
-        ds = load_dataset("roneneldan/TinyStories", split="train", streaming=True)
+        ds = load_dataset("roneneldan/TinyStories", split=split, streaming=True)
         getter = lambda ex: ex.get("text") or ""
     elif name == "openwebtext":
         ds = load_dataset("Skylion007/openwebtext", split="train", streaming=True)
         getter = lambda ex: ex.get("text") or ""
     elif name == "alpaca":
         ds = load_dataset("yahma/alpaca-cleaned", split="train", streaming=True)
-        def getter(ex):
-            ins = ex.get("instruction") or ""
-            inp = ex.get("input") or ""
-            out = ex.get("output") or ""
-            if inp:
-                return f"### Instruction:\n{ins}\n\n### Input:\n{inp}\n\n### Response:\n{out}\n"
-            else:
-                return f"### Instruction:\n{ins}\n\n### Response:\n{out}\n"
-        getter = getter
+        getter = _alpaca_getter
     else:
         raise ValueError(f"Unknown dataset {name}. Choose: wikitext, tinystories, openwebtext, alpaca.")
+    if skip > 0:
+        ds = ds.skip(skip)
     return ds, getter
+
+
+# Datasets that have an official validation split on HF Hub
+_HAS_VAL_SPLIT = {"wikitext", "tinystories"}
+
+
+def get_hf_val_stream_and_getter(name: str, skip_after: int = 0):
+    """Return a validation stream that doesn't overlap with the training stream."""
+    name_lower = name.lower()
+    if name_lower in _HAS_VAL_SPLIT:
+        return get_hf_stream_and_text_getter(name, split="validation")
+    # No official val split: skip past the training portion of the train split
+    return get_hf_stream_and_text_getter(name, split="train", skip=skip_after)
 
 def _encode(tokenizer, text: str, max_len: int | None = None) -> list:
     """Encode text with either HybridTokenizer or a HuggingFace tokenizer."""
@@ -168,7 +184,7 @@ def train_across_datasets(
         # ── Dataset loading ───────────────────────────────────────────────────
         try:
             train_stream, getter = get_hf_stream_and_text_getter(name)
-            val_stream, _        = get_hf_stream_and_text_getter(name)
+            val_stream, _        = get_hf_val_stream_and_getter(name, skip_after=train_items)
             train_ds = TextTokenDataset(train_stream, getter, tokenizer, max_len=max_len, max_items=train_items)
             val_ds   = TextTokenDataset(val_stream,   getter, tokenizer, max_len=max_len, max_items=val_items)
         except Exception as e:

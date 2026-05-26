@@ -207,12 +207,15 @@ class Transformer(nn.Module):
 
             if repetition_penalty != 1.0:
                 for b in range(x.shape[0]):
-                    seen  = x[b].unique()
-                    score = logits[b, seen]
-                    logits[b, seen] = torch.where(
+                    unique_ids, counts = x[b].unique(return_counts=True)
+                    score = logits[b, unique_ids]
+                    # Scale penalty exponentially with frequency so repeated tokens
+                    # get progressively harder to regenerate
+                    factor = repetition_penalty ** counts.float()
+                    logits[b, unique_ids] = torch.where(
                         score > 0,
-                        score / repetition_penalty,
-                        score * repetition_penalty,
+                        score / factor,
+                        score * factor,
                     )
 
             if suppress_ids:
