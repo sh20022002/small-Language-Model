@@ -138,8 +138,10 @@ class TextTokenDataset(Dataset):
         n = 0
         for ex in hf_stream:
             text = get_text(ex)
+            if not text or not text.strip():
+                continue          # skip blank / whitespace-only entries (common in wikitext)
             ids = _encode(tokenizer, text, max_len=max_len)
-            if ids:
+            if len(ids) > 1:     # need ≥2 tokens for next-token prediction (logits[:, :-1])
                 self.samples.append(torch.tensor(ids, dtype=torch.long))
                 n += 1
                 if max_items and n >= max_items:

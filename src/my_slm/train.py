@@ -263,9 +263,10 @@ def train_model_accelerate(
                 loss = loss_fn(logits[:, :-1].reshape(B * (T - 1), V),
                                labels[:, 1:].reshape(B * (T - 1)))
                 loss = loss + _repetition_ul_loss(logits, ids, labels, ul_alpha)
-                # Replace NaN/Inf with zero so the step is skipped cleanly
-                if torch.isnan(loss) or torch.isinf(loss):
-                    loss = torch.zeros_like(loss)
+                # nan_to_num preserves grad_fn (unlike zeros_like which detaches).
+                # NaN/Inf → 0.0 gives zero gradients for that step (safe no-op).
+                if not loss.isfinite():
+                    loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
