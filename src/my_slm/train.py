@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,6 +9,18 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Dataset
 from sklearn.model_selection import train_test_split
 import pandas as pd
+
+
+def _save_or_close_fig(fig_path, train_losses, val_losses, label="Loss"):
+    plt.figure(figsize=(6, 4))
+    plt.plot(train_losses, label=f"Train {label}")
+    plt.plot(val_losses,   label=f"Val {label}")
+    plt.xlabel("Epoch"); plt.ylabel(label); plt.legend(); plt.tight_layout()
+    if fig_path:
+        Path(fig_path).parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(fig_path, dpi=100, bbox_inches="tight")
+        print(f"[Plot] Loss curve → {fig_path}")
+    plt.close()
 
 
 def get_cosine_schedule_with_warmup(optimizer, warmup_steps: int, total_steps: int):
@@ -88,6 +101,7 @@ def train_model(
     scheduler=None,
     ul_alpha=0.1,
     accumulation_steps=4,
+    fig_path: str | None = None,
 ):
     print('started Training...')
     device = torch.device(device) if isinstance(device, str) else device
@@ -142,6 +156,11 @@ def train_model(
                 loss = loss + _repetition_ul_loss(logits, ids, labels, ul_alpha)
                 loss = loss / accumulation_steps  # scale before backward
 
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"[Warning] NaN/Inf loss at step {step} — skipping batch")
+                optimizer.zero_grad(set_to_none=True)
+                continue
+
             scaler.scale(loss).backward()
             total_loss += loss.detach().item() * accumulation_steps  # unscale for logging
 
@@ -188,17 +207,8 @@ def train_model(
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}, "
               f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%")
 
-    plt.figure(figsize=(6, 4))
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses,   label='Val Loss')
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
+    _save_or_close_fig(fig_path, train_losses, val_losses)
     return model
-
 
 
 def train_model_accelerate(
@@ -212,6 +222,7 @@ def train_model_accelerate(
     max_grad_norm=1.0,
     scheduler=None,
     ul_alpha=0.1,
+    fig_path: str | None = None,
 ):
     """
     Drop-in replacement for train_model that uses HuggingFace Accelerate.
@@ -252,6 +263,9 @@ def train_model_accelerate(
                 loss = loss_fn(logits[:, :-1].reshape(B * (T - 1), V),
                                labels[:, 1:].reshape(B * (T - 1)))
                 loss = loss + _repetition_ul_loss(logits, ids, labels, ul_alpha)
+                # Replace NaN/Inf with zero so the step is skipped cleanly
+                if torch.isnan(loss) or torch.isinf(loss):
+                    loss = torch.zeros_like(loss)
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
@@ -299,11 +313,7 @@ def train_model_accelerate(
                   f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%")
 
     if is_main:
-        plt.figure(figsize=(6, 4))
-        plt.plot(train_losses, label="Train Loss")
-        plt.plot(val_losses,   label="Val Loss")
-        plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend(); plt.tight_layout()
-        plt.show()
+        _save_or_close_fig(fig_path, train_losses, val_losses)
 
     return model
 

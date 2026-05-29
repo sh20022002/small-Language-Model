@@ -21,6 +21,31 @@ def _alpaca_getter(ex):
     return f"### Instruction:\n{ins}\n\n### Response:\n{out}\n"
 
 
+def _dolly_getter(ex):
+    ins = ex.get("instruction") or ""
+    ctx = ex.get("context") or ""
+    out = ex.get("response") or ""
+    if ctx:
+        return f"### Instruction:\n{ins}\n\n### Context:\n{ctx}\n\n### Response:\n{out}\n"
+    return f"### Instruction:\n{ins}\n\n### Response:\n{out}\n"
+
+
+def _gsm8k_getter(ex):
+    """GSM8K: question + step-by-step solution (chain-of-thought)."""
+    q = ex.get("question") or ""
+    a = ex.get("answer") or ""
+    return f"### Question:\n{q}\n\n### Solution:\n{a}\n"
+
+
+def _openorca_getter(ex):
+    sys_p = ex.get("system_prompt") or ""
+    q     = ex.get("question") or ""
+    r     = ex.get("response") or ""
+    if sys_p:
+        return f"### System:\n{sys_p}\n\n### Question:\n{q}\n\n### Answer:\n{r}\n"
+    return f"### Question:\n{q}\n\n### Answer:\n{r}\n"
+
+
 def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0):
     try:
         from datasets import load_dataset
@@ -36,18 +61,35 @@ def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0
     elif name == "openwebtext":
         ds = load_dataset("Skylion007/openwebtext", split="train", streaming=True)
         getter = lambda ex: ex.get("text") or ""
+    elif name == "c4":
+        ds = load_dataset("allenai/c4", "en", split=split, streaming=True)
+        getter = lambda ex: ex.get("text") or ""
     elif name == "alpaca":
         ds = load_dataset("yahma/alpaca-cleaned", split="train", streaming=True)
         getter = _alpaca_getter
+    elif name == "dolly":
+        ds = load_dataset("databricks/databricks-dolly-15k", split="train", streaming=True)
+        getter = _dolly_getter
+    elif name == "gsm8k":
+        ds = load_dataset("openai/gsm8k", "main", split=split, streaming=True)
+        getter = _gsm8k_getter
+    elif name == "openorca":
+        ds = load_dataset("open-orca/OpenOrca", split="train", streaming=True)
+        getter = _openorca_getter
     else:
-        raise ValueError(f"Unknown dataset {name}. Choose: wikitext, tinystories, openwebtext, alpaca.")
+        raise ValueError(
+            f"Unknown dataset {name}. "
+            "Choose: wikitext, tinystories, openwebtext, c4, alpaca, dolly, gsm8k, openorca."
+        )
     if skip > 0:
         ds = ds.skip(skip)
     return ds, getter
 
 
-# Datasets that have an official validation split on HF Hub
-_HAS_VAL_SPLIT = {"wikitext", "tinystories"}
+# Datasets with an official "validation" split on HF Hub
+_HAS_VAL_SPLIT = {"wikitext", "tinystories", "c4"}
+# Datasets whose held-out split is called "test" instead of "validation"
+_HAS_TEST_SPLIT = {"gsm8k"}
 
 
 def get_hf_val_stream_and_getter(name: str, skip_after: int = 0):
@@ -55,7 +97,12 @@ def get_hf_val_stream_and_getter(name: str, skip_after: int = 0):
     name_lower = name.lower()
     if name_lower in _HAS_VAL_SPLIT:
         return get_hf_stream_and_text_getter(name, split="validation")
-    # No official val split: skip past the training portion of the train split
+    if name_lower in _HAS_TEST_SPLIT:
+        return get_hf_stream_and_text_getter(name, split="test")
+    # dolly: only ~15 k examples — use the last 2 k as validation
+    if name_lower == "dolly":
+        return get_hf_stream_and_text_getter(name, split="train", skip=13_000)
+    # Large datasets with only a train split: skip past the training portion
     return get_hf_stream_and_text_getter(name, split="train", skip=skip_after)
 
 def _encode(tokenizer, text: str, max_len: int | None = None) -> list:
@@ -168,6 +215,7 @@ def train_across_datasets(
     ul_alpha: float = 0.1,
     accumulation_steps: int = 4,    # used only in single-GPU path
     save_dir: str = "./out",
+    save_figures: bool = True,      # save per-stage loss curves as PNG in save_dir
 ):
     """
     Multi-stage curriculum training over HuggingFace datasets.
@@ -227,6 +275,8 @@ def train_across_datasets(
             continue
 
         # ── Training ──────────────────────────────────────────────────────────
+        fig_path = (str(Path(save_dir) / f"{name}_loss.png")
+                    if save_figures and is_main else None)
         try:
             if use_ddp:
                 model = train_model_accelerate(
@@ -239,6 +289,7 @@ def train_across_datasets(
                     max_grad_norm = max_grad_norm,
                     scheduler     = scheduler,
                     ul_alpha      = ul_alpha,
+                    fig_path      = fig_path,
                 )
             else:
                 model = train_model(
@@ -253,6 +304,7 @@ def train_across_datasets(
                     scheduler          = scheduler,
                     ul_alpha           = ul_alpha,
                     accumulation_steps = accumulation_steps,
+                    fig_path           = fig_path,
                 )
         except Exception as e:
             if is_main:
