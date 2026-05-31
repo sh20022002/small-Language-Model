@@ -46,6 +46,11 @@ def _openorca_getter(ex):
     return f"### Question:\n{q}\n\n### Answer:\n{r}\n"
 
 
+def _hh_rlhf_getter(ex):
+    """Return the 'chosen' (good) response trajectory from Anthropic HH-RLHF."""
+    return ex.get("chosen") or ""
+
+
 def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0):
     try:
         from datasets import load_dataset
@@ -76,10 +81,17 @@ def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0
     elif name == "openorca":
         ds = load_dataset("open-orca/OpenOrca", split="train", streaming=True)
         getter = _openorca_getter
+    elif name == "bookcorpus":
+        ds = load_dataset("bookcorpus/bookcorpus", split="train", streaming=True)
+        getter = lambda ex: ex.get("text") or ""
+    elif name == "hh_rlhf":
+        ds = load_dataset("Anthropic/hh-rlhf", split="train", streaming=True)
+        getter = _hh_rlhf_getter
     else:
         raise ValueError(
             f"Unknown dataset {name}. "
-            "Choose: wikitext, tinystories, openwebtext, c4, alpaca, dolly, gsm8k, openorca."
+            "Choose: wikitext, tinystories, openwebtext, c4, bookcorpus, "
+            "alpaca, dolly, gsm8k, openorca, hh_rlhf."
         )
     if skip > 0:
         ds = ds.skip(skip)
@@ -89,7 +101,7 @@ def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0
 # Datasets with an official "validation" split on HF Hub
 _HAS_VAL_SPLIT = {"wikitext", "tinystories", "c4"}
 # Datasets whose held-out split is called "test" instead of "validation"
-_HAS_TEST_SPLIT = {"gsm8k"}
+_HAS_TEST_SPLIT = {"gsm8k", "hh_rlhf"}
 
 
 def get_hf_val_stream_and_getter(name: str, skip_after: int = 0):
@@ -172,8 +184,30 @@ class SliceLoader:
         try:
             return min(self.max_batches, len(self.loader))
         except TypeError:
-            # some loaders may not have __len__
             return self.max_batches
+
+
+class CombinedDataset(Dataset):
+    """Concatenate multiple TextTokenDataset objects into a single shuffleable pool."""
+    def __init__(self, *datasets):
+        self.datasets = list(datasets)
+        self._offsets: List[int] = []
+        total = 0
+        for d in self.datasets:
+            self._offsets.append(total)
+            total += len(d)
+        self._total = total
+
+    def __len__(self):
+        return self._total
+
+    def __getitem__(self, i):
+        # Walk backwards so larger offsets are checked first (O(n) but n is tiny)
+        for j in range(len(self.datasets) - 1, -1, -1):
+            if i >= self._offsets[j]:
+                return self.datasets[j][i - self._offsets[j]]
+        raise IndexError(i)
+
 
 # -----------------------------
 # Orchestrator (TRAIN-ONLY)
@@ -181,10 +215,17 @@ class SliceLoader:
 
 @dataclass
 class StageConfig:
-    name: str
-    # Either train for full epochs OR for a fixed number of steps (batches)
+    name: "str | list[str]"   # single dataset name OR list for a combined/interleaved stage
     epochs: int = 0
-    steps: int = 0  # if >0, we train only this many steps for the stage
+    steps: int = 0            # if >0, train exactly this many batches (one pseudo-epoch)
+    # ── Accuracy gate (epoch-based training only) ──────────────────────────────
+    # Keep running extra epochs until val accuracy ≥ min_val_accuracy  OR
+    # loss plateaus for plateau_patience consecutive epochs.
+    # max_epochs is the hard cap; set to 0 to disable the gate entirely.
+    min_val_accuracy: float = 0.0
+    max_epochs: int = 0
+    plateau_patience: int = 3
+    plateau_min_delta: float = 5e-4
 
 def _get_pad_id(tokenizer) -> int:
     """Return pad token id for HybridTokenizer or HuggingFace tokenizer."""
@@ -244,42 +285,65 @@ def train_across_datasets(
     collate = make_collate(pad_id=pad_id, ignore_index=-100)
 
     for stage in stages:
-        name = stage.name.lower()
-        if is_main:
-            print(f"\n=== Stage: {name} | epochs={stage.epochs} | steps={stage.steps} ===")
+        # ── Resolve name(s) ───────────────────────────────────────────────────
+        names = stage.name if isinstance(stage.name, list) else [stage.name]
+        names = [n.lower() for n in names]
+        display_name = "+".join(names)
 
-        # ── Dataset loading ───────────────────────────────────────────────────
+        if is_main:
+            print(f"\n=== Stage: {display_name} | epochs={stage.epochs} | steps={stage.steps}"
+                  f" | acc_target={stage.min_val_accuracy:.1f}% | max_ep={stage.max_epochs} ===")
+
+        # ── Dataset loading (one sub-dataset per name, then combined) ─────────
+        items_per = max(1, train_items // len(names))
+        val_per   = max(1, val_items   // len(names))
         try:
-            train_stream, getter = get_hf_stream_and_text_getter(name)
-            val_stream, _        = get_hf_val_stream_and_getter(name, skip_after=train_items)
-            train_ds = TextTokenDataset(train_stream, getter, tokenizer, max_len=max_len, max_items=train_items)
-            val_ds   = TextTokenDataset(val_stream,   getter, tokenizer, max_len=max_len, max_items=val_items)
+            train_parts, val_parts = [], []
+            for n in names:
+                tr_stream, getter = get_hf_stream_and_text_getter(n)
+                vl_stream, _      = get_hf_val_stream_and_getter(n, skip_after=train_items)
+                train_parts.append(
+                    TextTokenDataset(tr_stream, getter, tokenizer,
+                                     max_len=max_len, max_items=items_per))
+                val_parts.append(
+                    TextTokenDataset(vl_stream, getter, tokenizer,
+                                     max_len=max_len, max_items=val_per))
+            train_ds = CombinedDataset(*train_parts) if len(train_parts) > 1 else train_parts[0]
+            val_ds   = CombinedDataset(*val_parts)   if len(val_parts)   > 1 else val_parts[0]
         except Exception as e:
             if is_main:
-                print(f"[Skip] Stage '{name}' failed to load — {type(e).__name__}: {e}")
+                print(f"[Skip] Stage '{display_name}' failed to load — {type(e).__name__}: {e}")
             if use_ddp:
                 accelerator.wait_for_everyone()
             continue
 
-        base_train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  collate_fn=collate, num_workers=0)
-        val_loader        = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, collate_fn=collate, num_workers=0)
+        base_train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                                       collate_fn=collate, num_workers=0)
+        val_loader        = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+                                       collate_fn=collate, num_workers=0)
 
-        # DDP path: let Accelerator distribute the loaders
         if use_ddp:
             base_train_loader, val_loader = accelerator.prepare(base_train_loader, val_loader)
 
-        n_epochs = 1 if stage.steps > 0 else max(stage.epochs, 1)
+        n_epochs     = 1 if stage.steps > 0 else max(stage.epochs, 1)
         train_loader = SliceLoader(base_train_loader, stage.steps) if stage.steps > 0 else base_train_loader
 
         if n_epochs == 0:
             if is_main:
-                print(f"[Skip] Stage '{name}' has neither epochs nor steps > 0.")
+                print(f"[Skip] Stage '{display_name}' has neither epochs nor steps > 0.")
             continue
 
         # ── Training ──────────────────────────────────────────────────────────
-        fig_path = (str(Path(save_dir) / f"{name}_loss.png")
-                    if save_figures and is_main else None)
+        safe_name = display_name.replace("+", "_")
+        fig_path  = (str(Path(save_dir) / f"{safe_name}_loss.png")
+                     if save_figures and is_main else None)
         try:
+            common_kw = dict(
+                min_val_accuracy = stage.min_val_accuracy,
+                max_epochs       = stage.max_epochs,
+                plateau_patience = stage.plateau_patience,
+                plateau_min_delta= stage.plateau_min_delta,
+            )
             if use_ddp:
                 model = train_model_accelerate(
                     model         = model,
@@ -292,6 +356,7 @@ def train_across_datasets(
                     scheduler     = scheduler,
                     ul_alpha      = ul_alpha,
                     fig_path      = fig_path,
+                    **common_kw,
                 )
             else:
                 model = train_model(
@@ -307,16 +372,17 @@ def train_across_datasets(
                     ul_alpha           = ul_alpha,
                     accumulation_steps = accumulation_steps,
                     fig_path           = fig_path,
+                    **common_kw,
                 )
         except Exception as e:
             if is_main:
-                print(f"[Skip] Stage '{name}' training failed — {type(e).__name__}: {e}")
+                print(f"[Skip] Stage '{display_name}' training failed — {type(e).__name__}: {e}")
             if use_ddp:
                 accelerator.wait_for_everyone()
             continue
 
         if is_main:
-            ckpt_path = Path(save_dir) / f"{stage.name}_stage.pt"
+            ckpt_path = Path(save_dir) / f"{safe_name}_stage.pt"
             unwrapped = accelerator.unwrap_model(model) if use_ddp else model
             torch.save({"config": {}, "model_state": unwrapped.state_dict()}, ckpt_path)
             print(f"[Checkpoint] Saved {ckpt_path}")

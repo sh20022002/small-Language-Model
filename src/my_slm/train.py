@@ -102,6 +102,10 @@ def train_model(
     ul_alpha=0.1,
     accumulation_steps=4,
     fig_path: str | None = None,
+    min_val_accuracy: float = 0.0,
+    max_epochs: int = 0,
+    plateau_patience: int = 3,
+    plateau_min_delta: float = 5e-4,
 ):
     print('started Training...')
     device = torch.device(device) if isinstance(device, str) else device
@@ -122,6 +126,11 @@ def train_model(
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp and amp_dtype == torch.float16)
 
     train_losses, val_losses, val_accuracies = [], [], []
+    # effective_max: run at least `epochs` epochs; extend up to `max_epochs` total
+    # when accuracy gate is active.  If max_epochs==0, gate is disabled.
+    effective_max = max(epochs, max_epochs) if max_epochs > 0 else epochs
+    best_val_loss = float('inf')
+    no_improve    = 0
 
     # Resize embeddings once before training if vocab grew after freeze
     if hasattr(model, "token_emb") and hasattr(model, "resize_token_embeddings"):
@@ -137,7 +146,7 @@ def train_model(
         except Exception:
             pass  # streaming loaders may not support this pre-scan
 
-    for epoch in range(epochs):
+    for epoch in range(effective_max):
         model.train()
         total_loss = 0.0
         optimizer.zero_grad(set_to_none=True)
@@ -204,8 +213,23 @@ def train_model(
         val_losses.append(avg_val_loss)
         val_accuracies.append(accuracy)
 
-        print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}, "
-              f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%")
+        # Plateau tracking
+        if avg_val_loss < best_val_loss - plateau_min_delta:
+            best_val_loss = avg_val_loss
+            no_improve    = 0
+        else:
+            no_improve   += 1
+
+        plateau_tag = f"  [plateau {no_improve}/{plateau_patience}]" if no_improve > 0 else ""
+        print(f"Epoch {epoch+1}/{effective_max} — Train Loss: {avg_train_loss:.4f}, "
+              f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%{plateau_tag}")
+
+        # Accuracy gate: after minimum epochs, stop when target reached + plateau detected
+        if max_epochs > 0 and epoch >= epochs - 1:
+            if accuracy >= min_val_accuracy and no_improve >= plateau_patience:
+                print(f"[EarlyStop] Acc {accuracy:.1f}% ≥ {min_val_accuracy:.1f}% target "
+                      f"and loss plateaued — stopping at epoch {epoch+1}")
+                break
 
     _save_or_close_fig(fig_path, train_losses, val_losses)
     return model
@@ -223,6 +247,10 @@ def train_model_accelerate(
     scheduler=None,
     ul_alpha=0.1,
     fig_path: str | None = None,
+    min_val_accuracy: float = 0.0,
+    max_epochs: int = 0,
+    plateau_patience: int = 3,
+    plateau_min_delta: float = 5e-4,
 ):
     """
     Drop-in replacement for train_model that uses HuggingFace Accelerate.
@@ -246,8 +274,11 @@ def train_model_accelerate(
         print("Started Training (Accelerate / DDP) …")
 
     train_losses, val_losses, val_accuracies = [], [], []
+    effective_max = max(epochs, max_epochs) if max_epochs > 0 else epochs
+    best_val_loss = float('inf')
+    no_improve    = 0
 
-    for epoch in range(epochs):
+    for epoch in range(effective_max):
         model.train()
         total_loss = torch.tensor(0.0, device=accelerator.device)
 
@@ -309,9 +340,25 @@ def train_model_accelerate(
         val_losses.append(avg_val_loss)
         val_accuracies.append(accuracy)
 
+        # Plateau tracking
+        if avg_val_loss < best_val_loss - plateau_min_delta:
+            best_val_loss = avg_val_loss
+            no_improve    = 0
+        else:
+            no_improve   += 1
+
         if is_main:
-            print(f"Epoch {epoch+1}/{epochs} — Train Loss: {avg_train_loss:.4f}, "
-                  f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%")
+            plateau_tag = f"  [plateau {no_improve}/{plateau_patience}]" if no_improve > 0 else ""
+            print(f"Epoch {epoch+1}/{effective_max} — Train Loss: {avg_train_loss:.4f}, "
+                  f"Val Loss: {avg_val_loss:.4f}, Acc: {accuracy:.2f}%{plateau_tag}")
+
+        # Accuracy gate: after minimum epochs, stop when target reached + plateau detected
+        if max_epochs > 0 and epoch >= epochs - 1:
+            if accuracy >= min_val_accuracy and no_improve >= plateau_patience:
+                if is_main:
+                    print(f"[EarlyStop] Acc {accuracy:.1f}% ≥ {min_val_accuracy:.1f}% target "
+                          f"and loss plateaued — stopping at epoch {epoch+1}")
+                break
 
     if is_main:
         _save_or_close_fig(fig_path, train_losses, val_losses)
