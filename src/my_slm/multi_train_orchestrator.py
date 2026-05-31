@@ -81,8 +81,8 @@ def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0
     elif name == "openorca":
         ds = load_dataset("open-orca/OpenOrca", split="train", streaming=True)
         getter = _openorca_getter
-    elif name == "bookcorpus":
-        ds = load_dataset("bookcorpus/bookcorpus", split="train", streaming=True)
+    elif name in ("pg19", "bookcorpus"):
+        ds = load_dataset("deepmind/pg19", split="train", streaming=True)
         getter = lambda ex: ex.get("text") or ""
     elif name == "hh_rlhf":
         ds = load_dataset("Anthropic/hh-rlhf", split="train", streaming=True)
@@ -90,7 +90,7 @@ def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0
     else:
         raise ValueError(
             f"Unknown dataset {name}. "
-            "Choose: wikitext, tinystories, openwebtext, c4, bookcorpus, "
+            "Choose: wikitext, tinystories, openwebtext, c4, pg19, "
             "alpaca, dolly, gsm8k, openorca, hh_rlhf."
         )
     if skip > 0:
@@ -99,7 +99,7 @@ def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0
 
 
 # Datasets with an official "validation" split on HF Hub
-_HAS_VAL_SPLIT = {"wikitext", "tinystories", "c4"}
+_HAS_VAL_SPLIT = {"wikitext", "tinystories", "c4", "pg19", "bookcorpus"}
 # Datasets whose held-out split is called "test" instead of "validation"
 _HAS_TEST_SPLIT = {"gsm8k", "hh_rlhf"}
 
@@ -320,10 +320,11 @@ def train_across_datasets(
     if not use_ddp and device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Override the HF tokenizer's built-in model_max_length (GPT-2 defaults to 1024)
-    # so it doesn't warn when sequences are longer than that but still within our window.
+    # Suppress HF tokenizer warnings about "sequence longer than model_max_length".
+    # PackedTokenDataset intentionally tokenizes full documents before splitting
+    # into block_size chunks — the model never sees sequences longer than max_len.
     if not hasattr(tokenizer, "token2id") and hasattr(tokenizer, "model_max_length"):
-        tokenizer.model_max_length = max_len
+        tokenizer.model_max_length = int(1e9)
 
     pad_id = _get_pad_id(tokenizer)
     collate = make_collate(pad_id=pad_id, ignore_index=-100)
