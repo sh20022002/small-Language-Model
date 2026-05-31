@@ -116,6 +116,79 @@ def make_optimizer(
     return torch.optim.AdamW(base_groups, lr=lr, betas=betas)
 
 
+def load_latest_checkpoint(
+    model,
+    output_dir: str,
+    models_dir: str | None = None,
+    optimizer=None,
+    accelerator=None,
+) -> int:
+    """
+    Find and load the most recent checkpoint into model.
+
+    Search order (first match wins):
+      1. checkpoint-N/state.pt inside output_dir  — full state: weights + optimizer + step
+      2. *_stage.pt files inside output_dir        — weights only (no optimizer state)
+      3. *_stage.pt files inside models_dir        — weights only (pre-trained stages)
+
+    Args:
+        model:       the Transformer to load weights into.
+        output_dir:  training output directory (e.g. "/kaggle/working/slm_run").
+        models_dir:  optional directory of pre-trained stage .pt files
+                     (e.g. "<repo_root>/models"). Used as fallback when
+                     output_dir has no checkpoints at all.
+        optimizer:   if provided, optimizer state is restored from step checkpoints.
+        accelerator: Accelerator instance for DDP (used to unwrap model).
+
+    Returns:
+        global_step (int) — the saved step number, or 0 when loaded from a
+        stage checkpoint (optimizer state is not available in that format).
+    """
+    raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
+
+    def _load_state(path):
+        state = torch.load(path, map_location="cpu")
+        raw_model.load_state_dict(state["model_state"], strict=False)
+        return state
+
+    # ── Priority 1: step checkpoint (checkpoint-N/state.pt) ───────────────────
+    out = Path(output_dir)
+    if out.is_dir():
+        step_dirs = sorted(
+            [d for d in out.iterdir()
+             if d.is_dir() and d.name.startswith("checkpoint-")
+             and (d / "state.pt").exists()],
+            key=lambda d: int(d.name.split("-")[1]),
+        )
+        if step_dirs:
+            state = _load_state(step_dirs[-1] / "state.pt")
+            if optimizer is not None and "optimizer" in state:
+                optimizer.load_state_dict(state["optimizer"])
+            step = state.get("step", 0)
+            print(f"[Checkpoint] Resumed from {step_dirs[-1].name}  (step={step})")
+            return step
+
+    # ── Priority 2: stage checkpoint in output_dir ────────────────────────────
+    if out.is_dir():
+        stage_pts = sorted(out.glob("*_stage.pt"), key=lambda p: p.stat().st_mtime)
+        if stage_pts:
+            _load_state(stage_pts[-1])
+            print(f"[Checkpoint] Loaded stage weights: {stage_pts[-1].name}  (no optimizer state)")
+            return 0
+
+    # ── Priority 3: stage checkpoint in models_dir (pre-trained) ─────────────
+    if models_dir:
+        md = Path(models_dir)
+        if md.is_dir():
+            stage_pts = sorted(md.glob("*_stage.pt"), key=lambda p: p.stat().st_mtime)
+            if stage_pts:
+                _load_state(stage_pts[-1])
+                print(f"[Checkpoint] Loaded pre-trained weights: {stage_pts[-1].name}")
+                return 0
+
+    return 0
+
+
 def train_model(
     model,
     train_loader,

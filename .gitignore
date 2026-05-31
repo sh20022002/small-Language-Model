@@ -31,6 +31,7 @@ Thumbs.db
 
 # Patch / helper scripts (not part of the training pipeline)
 patch_notebook*.py
+insert_resume_cell.py
 
 # Screenshots
 scrshots/
