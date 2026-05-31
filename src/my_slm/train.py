@@ -179,13 +179,19 @@ def load_latest_checkpoint(
     # ── Priority 3: stage checkpoint in models_dir (pre-trained) ─────────────
     if models_dir:
         md = Path(models_dir)
-        if md.is_dir():
+        if not md.is_dir():
+            print(f"[Checkpoint] models_dir not found: {md}  "
+                  "(upload .pt files as a Kaggle dataset and set MODELS_DIR)")
+        else:
             stage_pts = sorted(md.glob("*_stage.pt"), key=lambda p: p.stat().st_mtime)
             if stage_pts:
                 _load_state(stage_pts[-1])
                 print(f"[Checkpoint] Loaded pre-trained weights: {stage_pts[-1].name}")
                 return 0
+            else:
+                print(f"[Checkpoint] models_dir exists but contains no *_stage.pt files: {md}")
 
+    print("[Checkpoint] No checkpoint found — training from scratch.")
     return 0
 
 
