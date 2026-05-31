@@ -1,5 +1,9 @@
 # DINOv3‑Style Self‑Supervised Language Model ("DiNO‑LM")
 
+> **Status:** Future direction — not yet implemented. The active training pipeline is in `kaggle_dual_gpu_finetune.ipynb`.
+
+
+
 This design adapts the core ideas of **DINOv3** (self‑distillation, momentum teacher, prototypes, entropy/centering, multi‑crop views) from vision to **language**. The goal is a **backbone LM that outputs general‑purpose representations** (token‑ and sequence‑level) which can then power small, tenant‑specific heads for chat/QA/ classification, etc., while remaining label‑free during pretraining.
 
 ---

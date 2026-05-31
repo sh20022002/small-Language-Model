@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -m pytest tests/test_model.py tests/test_training.py -q)",
-      "Bash(python _fix_nb.py)",
-      "Bash(python -c ' *)"
-    ]
-  }
-}

@@ -1,10 +1,14 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+
+# Environment
 .env
 *.env
 .env.*
 
-# Model checkpoints and large files
+# Model checkpoints and large binary files
 *.pt
 *.ckpt
 *.pkl
@@ -21,3 +25,15 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code project files
+.claude/
+
+# Patch / helper scripts (not part of the training pipeline)
+patch_notebook*.py
+
+# Screenshots
+scrshots/
+
+# Old development notebooks (training entry point is kaggle_dual_gpu_finetune.ipynb)
+notebooks/

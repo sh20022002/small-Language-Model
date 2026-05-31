@@ -1,5 +1,9 @@
 # Personalized-Business Chatbot Architecture
 
+> **Status:** Future direction — not yet implemented. The active training pipeline is in `kaggle_dual_gpu_finetune.ipynb`.
+
+
+
 ## 1) System at a glance
 
 - **LFE (Language Feature Extractor):**  
