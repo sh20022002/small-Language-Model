@@ -143,6 +143,49 @@ def _encode(tokenizer, text: str, max_len: int | None = None) -> list:
         return ids
 
 
+class PackedTokenDataset(Dataset):
+    """
+    Packed training: concatenates all token IDs (separated by EOS) into one long
+    stream, then splits into non-overlapping blocks of exactly `block_size` tokens.
+
+    Benefit: zero padding waste — every token position contributes to the loss,
+    giving 20-40% higher effective throughput vs. padded batches.
+    """
+    def __init__(self, hf_stream, get_text, tokenizer, block_size: int,
+                 max_texts: Optional[int] = None):
+        all_ids: list[int] = []
+        n = 0
+        for ex in hf_stream:
+            text = get_text(ex)
+            if not text or not text.strip():
+                continue
+            ids = _encode(tokenizer, text)   # no per-sequence length limit
+            if ids:
+                all_ids.extend(ids)
+                n += 1
+                if max_texts and n >= max_texts:
+                    break
+
+        self.blocks: List[torch.Tensor] = [
+            torch.tensor(all_ids[i: i + block_size], dtype=torch.long)
+            for i in range(0, len(all_ids) - block_size, block_size)
+        ]
+        if not self.blocks:
+            raise RuntimeError(
+                f"PackedTokenDataset: not enough tokens for even one block of {block_size}. "
+                "Increase max_texts or use a larger dataset.")
+
+    def __len__(self):  return len(self.blocks)
+    def __getitem__(self, i): return self.blocks[i]
+
+
+def packed_collate(batch: List[torch.Tensor]):
+    """All blocks have identical length — stack without padding."""
+    ids  = torch.stack(batch)                            # [B, block_size]
+    attn = torch.ones_like(ids, dtype=torch.long)        # no padding → all ones
+    return {"input_ids": ids, "attention_mask": attn, "labels": ids.clone()}
+
+
 class TextTokenDataset(Dataset):
     """Materializes a small list of token ID tensors for simple training on Colab."""
     def __init__(self, hf_stream, get_text, tokenizer, max_len: int, max_items: Optional[int] = None):
@@ -259,6 +302,7 @@ def train_across_datasets(
     accumulation_steps: int = 4,    # used only in single-GPU path
     save_dir: str = "./out",
     save_figures: bool = True,      # save per-stage loss curves as PNG in save_dir
+    use_packed: bool = True,        # packed training: no padding waste (20-40% faster)
 ):
     """
     Multi-stage curriculum training over HuggingFace datasets.
@@ -302,12 +346,20 @@ def train_across_datasets(
             for n in names:
                 tr_stream, getter = get_hf_stream_and_text_getter(n)
                 vl_stream, _      = get_hf_val_stream_and_getter(n, skip_after=train_items)
-                train_parts.append(
-                    TextTokenDataset(tr_stream, getter, tokenizer,
-                                     max_len=max_len, max_items=items_per))
-                val_parts.append(
-                    TextTokenDataset(vl_stream, getter, tokenizer,
-                                     max_len=max_len, max_items=val_per))
+                if use_packed:
+                    train_parts.append(
+                        PackedTokenDataset(tr_stream, getter, tokenizer,
+                                           block_size=max_len, max_texts=items_per))
+                    val_parts.append(
+                        PackedTokenDataset(vl_stream, getter, tokenizer,
+                                           block_size=max_len, max_texts=val_per))
+                else:
+                    train_parts.append(
+                        TextTokenDataset(tr_stream, getter, tokenizer,
+                                         max_len=max_len, max_items=items_per))
+                    val_parts.append(
+                        TextTokenDataset(vl_stream, getter, tokenizer,
+                                         max_len=max_len, max_items=val_per))
             train_ds = CombinedDataset(*train_parts) if len(train_parts) > 1 else train_parts[0]
             val_ds   = CombinedDataset(*val_parts)   if len(val_parts)   > 1 else val_parts[0]
         except Exception as e:
@@ -317,10 +369,11 @@ def train_across_datasets(
                 accelerator.wait_for_everyone()
             continue
 
+        _collate = packed_collate if use_packed else collate
         base_train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                                       collate_fn=collate, num_workers=0)
+                                       collate_fn=_collate, num_workers=0)
         val_loader        = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                                       collate_fn=collate, num_workers=0)
+                                       collate_fn=_collate, num_workers=0)
 
         if use_ddp:
             base_train_loader, val_loader = accelerator.prepare(base_train_loader, val_loader)

@@ -55,38 +55,65 @@ def make_optimizer(
     weight_decay: float = 0.1,
     betas: tuple = (0.9, 0.95),
     use_8bit: bool = False,
+    use_galore: bool = False,
+    galore_rank: int = 128,
+    galore_update_proj_gap: int = 200,
+    galore_scale: float = 0.25,
 ):
     """
-    Build AdamW with GPT-style weight-decay groups:
-      - decay   : all 2-D weight matrices in Linear layers
-      - no-decay : 1-D params (biases, RMSNorm.weight) and embeddings
+    Build AdamW with GPT-style weight-decay groups.
 
-    use_8bit=True uses bitsandbytes AdamW8bit (pip install bitsandbytes).
-    Recommended for Kaggle / Colab to shrink optimizer state by ~8×.
+    use_8bit   : bitsandbytes AdamW8bit — shrinks optimizer state ~8×.
+    use_galore : GaLore gradient projection on large weight matrices.
+                 Reduces optimizer memory by projecting gradients to rank-r.
+                 Pairs with use_8bit for maximum memory savings.
+                 Requires: pip install galore-torch
     """
-    decay, no_decay = [], []
+    decay, no_decay, galore_groups = [], [], []
+
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        # Embedding weights are 2-D but should not be decayed (lookup tables)
-        if param.ndim >= 2 and 'token_emb' not in name:
+        is_embedding = 'token_emb' in name
+        is_matrix    = param.ndim >= 2
+
+        if use_galore and is_matrix and not is_embedding:
+            # GaLore is most effective on large projection matrices.
+            galore_groups.append({
+                'params':            [param],
+                'rank':              galore_rank,
+                'update_proj_gap':   galore_update_proj_gap,
+                'scale':             galore_scale,
+                'proj_type':         'std',
+                'weight_decay':      weight_decay,
+            })
+        elif is_matrix and not is_embedding:
             decay.append(param)
         else:
             no_decay.append(param)
 
-    groups = [
+    base_groups = [
         {'params': decay,    'weight_decay': weight_decay},
         {'params': no_decay, 'weight_decay': 0.0},
     ]
+    all_groups = base_groups + galore_groups
+
+    if use_galore:
+        try:
+            from galore_torch import GaLoreAdamW8bit, GaLoreAdamW
+        except ImportError as exc:
+            raise ImportError("pip install galore-torch to use use_galore=True") from exc
+        return (GaLoreAdamW8bit if use_8bit else GaLoreAdamW)(
+            all_groups, lr=lr, betas=betas)
 
     if use_8bit:
         try:
             import bitsandbytes as bnb
-            return bnb.optim.AdamW8bit(groups, lr=lr, betas=betas)
+            return bnb.optim.AdamW8bit(base_groups, lr=lr, betas=betas)
         except ImportError as exc:
             raise ImportError("pip install bitsandbytes to use use_8bit=True") from exc
 
-    return torch.optim.AdamW(groups, lr=lr, betas=betas)
+    return torch.optim.AdamW(base_groups, lr=lr, betas=betas)
 
 
 def train_model(
@@ -112,10 +139,14 @@ def train_model(
     model.to(device)
     loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index)
 
-    # TF32 — free speedup on Ampere GPUs (A100, RTX 30xx); no-op on older GPUs
     if device.type == "cuda":
+        # TF32 — free speedup on Ampere GPUs (A100, RTX 30xx); no-op on older GPUs
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        # Enable memory-efficient SDPA backend (works on Turing/T4 and newer).
+        # Flash-SDP is also enabled but only activates on Ampere+ hardware.
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
 
     # bfloat16 requires Ampere (compute capability ≥ 8.0, e.g. A100).
     # T4 is 7.5 — is_bf16_supported() can return True there but hardware

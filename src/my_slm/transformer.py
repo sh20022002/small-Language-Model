@@ -39,29 +39,34 @@ class RoPE:
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, heads, window, dropout=0.0):
+    def __init__(self, dim, heads, window, dropout=0.0, kv_heads=None):
         super().__init__()
-        self.heads     = heads
+        self.heads    = heads
+        # GQA: kv_heads < heads → each KV head is shared by (heads // kv_heads) Q heads.
+        # kv_heads == heads (default) → standard multi-head attention.
+        self.kv_heads = kv_heads if kv_heads is not None else heads
+        assert heads % self.kv_heads == 0, "heads must be divisible by kv_heads"
         self.head_dim  = dim // heads
         self.window    = window
         self.dropout_p = dropout
-        self.qkv = nn.Linear(dim, dim * 3, bias=False)
-        self.out = nn.Linear(dim, dim,     bias=False)
 
-        # Precompute RoPE sin/cos up to window length — stored as non-trainable
-        # buffers so they move to the correct device automatically with model.to().
+        # Separate Q and KV projections so KV can have fewer heads (GQA / MQA).
+        self.q  = nn.Linear(dim, dim, bias=False)
+        self.kv = nn.Linear(dim, 2 * self.kv_heads * self.head_dim, bias=False)
+        self.out = nn.Linear(dim, dim, bias=False)
+
+        # Precomputed RoPE buffers — head_dim is the same for Q and KV.
         half  = self.head_dim // 2
-        theta = 10_000.0 ** (-torch.arange(half) / half)          # [D/2]
-        pos   = torch.arange(window)                               # [W]
-        freq  = torch.outer(pos, theta)                            # [W, D/2]
-        # shape [1, 1, W, D/2] — broadcast over batch and head dims
+        theta = 10_000.0 ** (-torch.arange(half) / half)
+        pos   = torch.arange(window)
+        freq  = torch.outer(pos, theta)
         self.register_buffer('_rope_sin', freq.sin().unsqueeze(0).unsqueeze(0))
         self.register_buffer('_rope_cos', freq.cos().unsqueeze(0).unsqueeze(0))
 
     def _apply_rope(self, x: torch.Tensor) -> torch.Tensor:
-        """x: [B, H, T, D] → rotated [B, H, T, D] using cached tables."""
+        """x: [B, H, T, D] → rotated [B, H, T, D].  Works for any H (Q or KV heads)."""
         T   = x.shape[2]
-        sin = self._rope_sin[:, :, :T, :]   # [1, 1, T, D/2]
+        sin = self._rope_sin[:, :, :T, :]
         cos = self._rope_cos[:, :, :T, :]
         x1, x2 = x[..., ::2], x[..., 1::2]
         return torch.stack([x1 * cos - x2 * sin,
@@ -69,17 +74,24 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x, attention_mask=None):
         B, T, C = x.shape
-        H, D    = self.heads, self.head_dim
+        H, KVH, D = self.heads, self.kv_heads, self.head_dim
 
-        qkv = self.qkv(x).view(B, T, H, 3 * D).transpose(1, 2)   # [B, H, T, 3D]
-        q, k, v = qkv.chunk(3, dim=-1)
-        q, k = self._apply_rope(q), self._apply_rope(k)
+        q  = self.q(x).view(B, T, H, D).transpose(1, 2)                 # [B, H,   T, D]
+        kv = self.kv(x).view(B, T, 2, KVH, D).permute(2, 0, 3, 1, 4)  # [2, B, KVH, T, D]
+        k, v = kv[0], kv[1]
 
-        # Local causal mask: each position sees at most `window` previous tokens.
+        q = self._apply_rope(q)
+        k = self._apply_rope(k)
+
+        # GQA: broadcast KV heads to match Q heads via repeat_interleave.
+        if KVH < H:
+            rep = H // KVH
+            k = k.repeat_interleave(rep, dim=1)   # [B, H, T, D]
+            v = v.repeat_interleave(rep, dim=1)
+
         causal_mask = self._causal_local_mask(T, self.window, x.device)
-
         if attention_mask is not None:
-            pad_mask    = attention_mask[:, None, None, :].bool()  # [B,1,1,T]
+            pad_mask    = attention_mask[:, None, None, :].bool()
             causal_mask = causal_mask & pad_mask
 
         dp  = self.dropout_p if self.training else 0.0
@@ -109,10 +121,10 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, heads, mlp_dim, window, dropout=0.0):
+    def __init__(self, dim, heads, mlp_dim, window, kv_heads=None, dropout=0.0):
         super().__init__()
         self.norm1 = RMSNorm(dim)
-        self.attn  = MultiHeadAttention(dim, heads, window, dropout)
+        self.attn  = MultiHeadAttention(dim, heads, window, dropout, kv_heads=kv_heads)
         self.norm2 = RMSNorm(dim)
         self.ff    = FeedForward(dim, mlp_dim, dropout)
 
@@ -124,15 +136,16 @@ class TransformerBlock(nn.Module):
 
 class Transformer(nn.Module):
     def __init__(self, vocab_size, dim, depth, heads, mlp_dim, window,
-                 dropout=0.0, tie_weights=True, use_checkpoint=False):
+                 kv_heads=None, dropout=0.0, tie_weights=True, use_checkpoint=False):
         super().__init__()
         self.use_checkpoint = use_checkpoint
         self.max_seq_len    = window
-        self.depth          = depth          # stored for depth-scaled init
+        self.depth          = depth
         self.token_emb = nn.Embedding(vocab_size, dim)
         self.drop      = nn.Dropout(dropout)
         self.blocks    = nn.ModuleList([
-            TransformerBlock(dim, heads, mlp_dim, window, dropout=dropout)
+            TransformerBlock(dim, heads, mlp_dim, window,
+                             kv_heads=kv_heads, dropout=dropout)
             for _ in range(depth)
         ])
         self.norm      = RMSNorm(dim)
@@ -154,7 +167,7 @@ class Transformer(nn.Module):
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
                 # out-projection of attention and final FF proj feed into residual stream
-                is_residual = name.endswith(('.attn.out', '.ff.proj'))
+                is_residual = name.endswith(('.attn.out', '.ff.proj'))  # same names post-GQA
                 std = residual_std if is_residual else 0.02
                 nn.init.normal_(module.weight, mean=0.0, std=std)
                 if module.bias is not None:
