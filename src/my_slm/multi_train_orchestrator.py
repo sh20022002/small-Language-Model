@@ -81,8 +81,8 @@ def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0
     elif name == "openorca":
         ds = load_dataset("open-orca/OpenOrca", split="train", streaming=True)
         getter = _openorca_getter
-    elif name in ("pg19", "bookcorpus"):
-        ds = load_dataset("deepmind/pg19", split="train", streaming=True)
+    elif name in ("stories", "pg19", "bookcorpus"):
+        ds = load_dataset("ajibawa-2023/Children-Stories-Collection", split="train", streaming=True)
         getter = lambda ex: ex.get("text") or ""
     elif name == "hh_rlhf":
         ds = load_dataset("Anthropic/hh-rlhf", split="train", streaming=True)
@@ -90,7 +90,7 @@ def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0
     else:
         raise ValueError(
             f"Unknown dataset {name}. "
-            "Choose: wikitext, tinystories, openwebtext, c4, pg19, "
+            "Choose: wikitext, tinystories, openwebtext, c4, stories, "
             "alpaca, dolly, gsm8k, openorca, hh_rlhf."
         )
     if skip > 0:
@@ -99,7 +99,7 @@ def get_hf_stream_and_text_getter(name: str, split: str = "train", skip: int = 0
 
 
 # Datasets with an official "validation" split on HF Hub
-_HAS_VAL_SPLIT = {"wikitext", "tinystories", "c4", "pg19", "bookcorpus"}
+_HAS_VAL_SPLIT = {"wikitext", "tinystories", "c4"}
 # Datasets whose held-out split is called "test" instead of "validation"
 _HAS_TEST_SPLIT = {"gsm8k", "hh_rlhf"}
 
