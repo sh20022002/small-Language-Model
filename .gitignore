@@ -8,12 +8,17 @@ __pycache__/
 *.env
 .env.*
 
-# Model checkpoints and large binary files
-*.pt
+# large binary files
+
 *.ckpt
 *.pkl
 *.pkl.gz
 *.bin
+*.pt
+
+# Trained model checkpoints (keep the folder, not its contents)
+models/*
+!models/.gitkeep
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
