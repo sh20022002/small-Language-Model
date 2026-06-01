@@ -3,7 +3,7 @@ from typing import Iterable, List, Optional
 from pathlib import Path
 import itertools
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, IterableDataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
 from my_slm.train import train_model, train_model_accelerate
@@ -143,40 +143,65 @@ def _encode(tokenizer, text: str, max_len: int | None = None) -> list:
         return ids
 
 
-class PackedTokenDataset(Dataset):
+class PackedTokenDataset(IterableDataset):
     """
-    Packed training: concatenates all token IDs (separated by EOS) into one long
-    stream, then splits into non-overlapping blocks of exactly `block_size` tokens.
+    Lazy packed training: tokenizes on-the-fly from a streaming HF dataset.
+    Concatenates token IDs (separated by EOS) into a rolling buffer, yielding
+    non-overlapping blocks of exactly `block_size` tokens as they fill up.
 
-    Benefit: zero padding waste — every token position contributes to the loss,
-    giving 20-40% higher effective throughput vs. padded batches.
+    Benefits:
+    - Zero padding waste — every position contributes to the loss.
+    - No upfront tokenization — training starts immediately.
+    - Multi-epoch safe — re-iterating restarts the HF stream from the beginning.
     """
     def __init__(self, hf_stream, get_text, tokenizer, block_size: int,
                  max_texts: Optional[int] = None):
-        all_ids: list[int] = []
+        self._stream     = hf_stream
+        self._get_text   = get_text
+        self._tokenizer  = tokenizer
+        self._block_size = block_size
+        self._max_texts  = max_texts
+
+    def __iter__(self):
+        buffer: List[int] = []
         n = 0
-        for ex in hf_stream:
-            text = get_text(ex)
+        for ex in self._stream:
+            text = self._get_text(ex)
             if not text or not text.strip():
                 continue
-            ids = _encode(tokenizer, text)   # no per-sequence length limit
-            if ids:
-                all_ids.extend(ids)
-                n += 1
-                if max_texts and n >= max_texts:
-                    break
+            ids = _encode(self._tokenizer, text)
+            if not ids:
+                continue
+            buffer.extend(ids)
+            n += 1
+            if self._max_texts and n >= self._max_texts:
+                break
+            while len(buffer) >= self._block_size:
+                yield torch.tensor(buffer[:self._block_size], dtype=torch.long)
+                buffer = buffer[self._block_size:]
+        # flush any remaining complete block
+        while len(buffer) >= self._block_size:
+            yield torch.tensor(buffer[:self._block_size], dtype=torch.long)
+            buffer = buffer[self._block_size:]
 
-        self.blocks: List[torch.Tensor] = [
-            torch.tensor(all_ids[i: i + block_size], dtype=torch.long)
-            for i in range(0, len(all_ids) - block_size, block_size)
-        ]
-        if not self.blocks:
-            raise RuntimeError(
-                f"PackedTokenDataset: not enough tokens for even one block of {block_size}. "
-                "Increase max_texts or use a larger dataset.")
 
-    def __len__(self):  return len(self.blocks)
-    def __getitem__(self, i): return self.blocks[i]
+class CombinedIterableDataset(IterableDataset):
+    """Round-robin interleave multiple PackedTokenDatasets."""
+    def __init__(self, *datasets):
+        self.datasets = list(datasets)
+
+    def __iter__(self):
+        iters = [iter(d) for d in self.datasets]
+        active = list(range(len(iters)))
+        while active:
+            next_active = []
+            for i in active:
+                try:
+                    yield next(iters[i])
+                    next_active.append(i)
+                except StopIteration:
+                    pass
+            active = next_active
 
 
 def packed_collate(batch: List[torch.Tensor]):
@@ -361,8 +386,12 @@ def train_across_datasets(
                     val_parts.append(
                         TextTokenDataset(vl_stream, getter, tokenizer,
                                          max_len=max_len, max_items=val_per))
-            train_ds = CombinedDataset(*train_parts) if len(train_parts) > 1 else train_parts[0]
-            val_ds   = CombinedDataset(*val_parts)   if len(val_parts)   > 1 else val_parts[0]
+            if use_packed:
+                train_ds = CombinedIterableDataset(*train_parts) if len(train_parts) > 1 else train_parts[0]
+                val_ds   = CombinedIterableDataset(*val_parts)   if len(val_parts)   > 1 else val_parts[0]
+            else:
+                train_ds = CombinedDataset(*train_parts) if len(train_parts) > 1 else train_parts[0]
+                val_ds   = CombinedDataset(*val_parts)   if len(val_parts)   > 1 else val_parts[0]
         except Exception as e:
             if is_main:
                 print(f"[Skip] Stage '{display_name}' failed to load — {type(e).__name__}: {e}")
@@ -371,7 +400,10 @@ def train_across_datasets(
             continue
 
         _collate = packed_collate if use_packed else collate
-        base_train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+        # IterableDataset (packed mode) doesn't support shuffle in DataLoader;
+        # data diversity comes from the token-stream interleaving instead.
+        base_train_loader = DataLoader(train_ds, batch_size=batch_size,
+                                       shuffle=not use_packed,
                                        collate_fn=_collate, num_workers=0)
         val_loader        = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
                                        collate_fn=_collate, num_workers=0)
