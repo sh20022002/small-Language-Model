@@ -460,6 +460,10 @@ def train_across_datasets(
                     fig_path           = fig_path,
                     **common_kw,
                 )
+        except (TypeError, AttributeError, NameError):
+            # These are programming errors (e.g. a bad len()/API call), not a
+            # flaky dataset — don't mask them as a soft skip, surface the bug.
+            raise
         except Exception as e:
             if is_main:
                 print(f"[Skip] Stage '{display_name}' training failed — {type(e).__name__}: {e}")

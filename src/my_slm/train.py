@@ -122,6 +122,7 @@ def load_latest_checkpoint(
     models_dir: str | None = None,
     optimizer=None,
     accelerator=None,
+    stage_order: list[str] | None = None,
 ) -> int:
     """
     Find and load the most recent checkpoint into model.
@@ -139,6 +140,11 @@ def load_latest_checkpoint(
                      output_dir has no checkpoints at all.
         optimizer:   if provided, optimizer state is restored from step checkpoints.
         accelerator: Accelerator instance for DDP (used to unwrap model).
+        stage_order: optional curriculum order of stage names (the safe_names,
+                     e.g. ["tinystories_stories", "wikitext_c4", ...]). When
+                     given, the furthest-along stage checkpoint is chosen instead
+                     of the newest by mtime — important for uploaded Kaggle
+                     datasets where all files share the same upload timestamp.
 
     Returns:
         global_step (int) — the saved step number, or 0 when loaded from a
@@ -151,6 +157,17 @@ def load_latest_checkpoint(
     def _log(*a):
         if _is_main:
             print(*a)
+
+    def _pick_stage(stage_pts):
+        """Choose the furthest-along stage checkpoint (by curriculum order when
+        known, else newest mtime)."""
+        if stage_order:
+            def _rank(p):
+                name = p.stem[:-6] if p.stem.endswith("_stage") else p.stem
+                return stage_order.index(name) if name in stage_order else -1
+            # Tie-break unknown names (rank -1) by mtime so they don't win.
+            return max(stage_pts, key=lambda p: (_rank(p), p.stat().st_mtime))
+        return max(stage_pts, key=lambda p: p.stat().st_mtime)
 
     def _load_state(path):
         state = torch.load(path, map_location="cpu")
@@ -176,10 +193,11 @@ def load_latest_checkpoint(
 
     # ── Priority 2: stage checkpoint in output_dir ────────────────────────────
     if out.is_dir():
-        stage_pts = sorted(out.glob("*_stage.pt"), key=lambda p: p.stat().st_mtime)
+        stage_pts = list(out.glob("*_stage.pt"))
         if stage_pts:
-            _load_state(stage_pts[-1])
-            _log(f"[Checkpoint] Loaded stage weights: {stage_pts[-1].name}  (no optimizer state)")
+            best = _pick_stage(stage_pts)
+            _load_state(best)
+            _log(f"[Checkpoint] Loaded stage weights: {best.name}  (no optimizer state)")
             return 0
 
     # ── Priority 3: stage checkpoint in models_dir (pre-trained) ─────────────
@@ -189,10 +207,11 @@ def load_latest_checkpoint(
             _log(f"[Checkpoint] models_dir not found: {md}  "
                   "(upload .pt files as a Kaggle dataset and set MODELS_DIR)")
         else:
-            stage_pts = sorted(md.glob("*_stage.pt"), key=lambda p: p.stat().st_mtime)
+            stage_pts = list(md.glob("*_stage.pt"))
             if stage_pts:
-                _load_state(stage_pts[-1])
-                _log(f"[Checkpoint] Loaded pre-trained weights: {stage_pts[-1].name}")
+                best = _pick_stage(stage_pts)
+                _load_state(best)
+                _log(f"[Checkpoint] Loaded pre-trained weights: {best.name}")
                 return 0
             else:
                 _log(f"[Checkpoint] models_dir exists but contains no *_stage.pt files: {md}")
@@ -265,6 +284,8 @@ def train_model(
     for epoch in range(effective_max):
         model.train()
         total_loss = 0.0
+        n_train_batches = 0
+        pending_grads   = False
         optimizer.zero_grad(set_to_none=True)
 
         for step, batch in enumerate(train_loader):
@@ -288,22 +309,37 @@ def train_model(
 
             scaler.scale(loss).backward()
             total_loss += loss.detach().item() * accumulation_steps  # unscale for logging
+            n_train_batches += 1
+            pending_grads   = True
 
-            is_last = (step + 1 == len(train_loader))
-            if (step + 1) % accumulation_steps == 0 or is_last:
+            if (step + 1) % accumulation_steps == 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
+                pending_grads = False
                 if scheduler is not None:
                     scheduler.step()
 
-        avg_train_loss = total_loss / max(1, len(train_loader))
+        # Flush gradients left over from a final partial accumulation window.
+        # Replaces the old `is_last` check, which needed len(train_loader) and
+        # so broke on IterableDataset (packed mode).
+        if pending_grads:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            if scheduler is not None:
+                scheduler.step()
+
+        avg_train_loss = total_loss / max(1, n_train_batches)
         train_losses.append(avg_train_loss)
 
         model.eval()
         val_loss, correct, total = 0.0, 0, 0
+        n_val_batches = 0
         with torch.no_grad():
             for batch in val_loader:
                 ids    = batch["input_ids"].to(device, non_blocking=True)
@@ -318,13 +354,14 @@ def train_model(
                     loss = loss_fn(shift_logits, shift_labels)
 
                 val_loss += loss.detach().item()
+                n_val_batches += 1
 
                 pred = logits[:, :-1].argmax(dim=-1)
                 mask = labels[:, 1:] != ignore_index
                 correct += (pred[mask] == labels[:, 1:][mask]).sum().item()
                 total   += mask.sum().item()
 
-        avg_val_loss = val_loss / max(1, len(val_loader))
+        avg_val_loss = val_loss / max(1, n_val_batches)
         accuracy = (correct / max(total, 1)) * 100.0
         val_losses.append(avg_val_loss)
         val_accuracies.append(accuracy)
@@ -397,6 +434,7 @@ def train_model_accelerate(
     for epoch in range(effective_max):
         model.train()
         total_loss = torch.tensor(0.0, device=accelerator.device)
+        n_train_batches = 0
 
         for batch in train_loader:
             ids    = batch["input_ids"]
@@ -425,14 +463,17 @@ def train_model_accelerate(
                 optimizer.zero_grad(set_to_none=True)
 
             total_loss += loss.detach()
+            n_train_batches += 1
 
-        # Aggregate loss across all processes
+        # Aggregate loss across all processes. len(train_loader) is unavailable
+        # for IterableDataset (packed mode), so divide by the counted batches.
         total_loss = accelerator.reduce(total_loss, reduction="mean")
-        avg_train_loss = total_loss.item() / max(1, len(train_loader))
+        avg_train_loss = total_loss.item() / max(1, n_train_batches)
         train_losses.append(avg_train_loss)
 
         model.eval()
         val_loss, correct, total = 0.0, 0, 0
+        n_val_batches = 0
         with torch.no_grad():
             for batch in val_loader:
                 ids    = batch["input_ids"]
@@ -445,13 +486,14 @@ def train_model_accelerate(
                 shift_labels = labels[:, 1:].reshape(B * (T - 1))
                 l = loss_fn(shift_logits, shift_labels)
                 val_loss += l.detach().item()
+                n_val_batches += 1
 
                 pred = logits[:, :-1].argmax(dim=-1)
                 mask = labels[:, 1:] != ignore_index
                 correct += (pred[mask] == labels[:, 1:][mask]).sum().item()
                 total   += mask.sum().item()
 
-        avg_val_loss = val_loss / max(1, len(val_loader))
+        avg_val_loss = val_loss / max(1, n_val_batches)
         accuracy     = (correct / max(total, 1)) * 100.0
         val_losses.append(avg_val_loss)
         val_accuracies.append(accuracy)
