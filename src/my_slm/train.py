@@ -146,6 +146,12 @@ def load_latest_checkpoint(
     """
     raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
 
+    # Only the main DDP rank logs, so messages aren't duplicated per-GPU.
+    _is_main = accelerator is None or accelerator.is_main_process
+    def _log(*a):
+        if _is_main:
+            print(*a)
+
     def _load_state(path):
         state = torch.load(path, map_location="cpu")
         raw_model.load_state_dict(state["model_state"], strict=False)
@@ -165,7 +171,7 @@ def load_latest_checkpoint(
             if optimizer is not None and "optimizer" in state:
                 optimizer.load_state_dict(state["optimizer"])
             step = state.get("step", 0)
-            print(f"[Checkpoint] Resumed from {step_dirs[-1].name}  (step={step})")
+            _log(f"[Checkpoint] Resumed from {step_dirs[-1].name}  (step={step})")
             return step
 
     # ── Priority 2: stage checkpoint in output_dir ────────────────────────────
@@ -173,25 +179,25 @@ def load_latest_checkpoint(
         stage_pts = sorted(out.glob("*_stage.pt"), key=lambda p: p.stat().st_mtime)
         if stage_pts:
             _load_state(stage_pts[-1])
-            print(f"[Checkpoint] Loaded stage weights: {stage_pts[-1].name}  (no optimizer state)")
+            _log(f"[Checkpoint] Loaded stage weights: {stage_pts[-1].name}  (no optimizer state)")
             return 0
 
     # ── Priority 3: stage checkpoint in models_dir (pre-trained) ─────────────
     if models_dir:
         md = Path(models_dir)
         if not md.is_dir():
-            print(f"[Checkpoint] models_dir not found: {md}  "
+            _log(f"[Checkpoint] models_dir not found: {md}  "
                   "(upload .pt files as a Kaggle dataset and set MODELS_DIR)")
         else:
             stage_pts = sorted(md.glob("*_stage.pt"), key=lambda p: p.stat().st_mtime)
             if stage_pts:
                 _load_state(stage_pts[-1])
-                print(f"[Checkpoint] Loaded pre-trained weights: {stage_pts[-1].name}")
+                _log(f"[Checkpoint] Loaded pre-trained weights: {stage_pts[-1].name}")
                 return 0
             else:
-                print(f"[Checkpoint] models_dir exists but contains no *_stage.pt files: {md}")
+                _log(f"[Checkpoint] models_dir exists but contains no *_stage.pt files: {md}")
 
-    print("[Checkpoint] No checkpoint found — training from scratch.")
+    _log("[Checkpoint] No checkpoint found — training from scratch.")
     return 0
 
 
