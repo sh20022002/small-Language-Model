@@ -14,7 +14,7 @@ __pycache__/
 *.pkl
 *.pkl.gz
 *.bin
-*.pt
+
 
 # Trained model checkpoints (keep the folder, not its contents)
 models/*
