@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 from pathlib import Path
-import itertools
 import torch
 from torch.utils.data import Dataset, IterableDataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
 from my_slm.train import train_model, train_model_accelerate
+from my_slm.utils import encode, get_eos_token_id, get_pad_token_id
 
 # -----------------------------
 # Dataset helpers
@@ -117,30 +117,8 @@ def get_hf_val_stream_and_getter(name: str, skip_after: int = 0):
     # Large datasets with only a train split: skip past the training portion
     return get_hf_stream_and_text_getter(name, split="train", skip=skip_after)
 
-def _encode(tokenizer, text: str, max_len: int | None = None) -> list:
-    """Encode text with either HybridTokenizer or a HuggingFace tokenizer.
-
-    Appends EOS to every sequence so the model learns when to stop generating.
-    max_len reserves one slot for EOS, keeping total length within the window.
-    """
-    if hasattr(tokenizer, "token2id"):
-        ids = tokenizer.encode(text, mode="flat")
-        eos = tokenizer.token2id.get("<EOS>") or tokenizer.token2id.get("<PAD>")
-        if max_len:
-            ids = ids[: max_len - 1]
-        if eos is not None:
-            ids = ids + [eos]
-        return ids
-    else:
-        kwargs = {"add_special_tokens": False}
-        if max_len:
-            kwargs["truncation"] = True
-            kwargs["max_length"] = max_len - 1   # leave room for EOS
-        ids = tokenizer.encode(text, **kwargs)
-        eos_id = getattr(tokenizer, "eos_token_id", None)
-        if eos_id is not None:
-            ids = ids + [eos_id]
-        return ids
+# Use the unified encode from utils; provides backward compatibility
+_encode = encode
 
 
 class PackedTokenDataset(IterableDataset):
@@ -295,13 +273,9 @@ class StageConfig:
     plateau_patience: int = 3
     plateau_min_delta: float = 5e-4
 
-def _get_pad_id(tokenizer) -> int:
-    """Return pad token id for HybridTokenizer or HuggingFace tokenizer."""
-    if hasattr(tokenizer, "token2id"):
-        return tokenizer.token2id.get("<PAD>", 0)
-    if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
-        return tokenizer.pad_token_id
-    return 0
+# Backward compatibility aliases
+_get_pad_id = get_pad_token_id
+_get_eos_id = get_eos_token_id
 
 
 def train_across_datasets(
@@ -474,7 +448,19 @@ def train_across_datasets(
         if is_main:
             ckpt_path = Path(save_dir) / f"{safe_name}_stage.pt"
             unwrapped = accelerator.unwrap_model(model) if use_ddp else model
-            torch.save({"config": {}, "model_state": unwrapped.state_dict()}, ckpt_path)
+
+            # Save checkpoint with real config for reproducibility
+            config = {
+                "vocab_size": model.token_emb.num_embeddings,
+                "dim": model.token_emb.embedding_dim,
+                "depth": model.depth,
+                "heads": getattr(model.blocks[0].attn, "heads", 8),
+                "kv_heads": getattr(model.blocks[0].attn, "kv_heads", 8),
+                "mlp_dim": getattr(model.blocks[0].ff, "gate", None).out_features if hasattr(model.blocks[0].ff, "gate") else 2048,
+                "window": model.max_seq_len,
+                "tie_weights": True,  # This is the default in Transformer
+            }
+            torch.save({"config": config, "model_state": unwrapped.state_dict()}, ckpt_path)
             print(f"[Checkpoint] Saved {ckpt_path}")
 
         if use_ddp:

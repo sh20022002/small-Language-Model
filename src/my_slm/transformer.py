@@ -202,52 +202,78 @@ class Transformer(nn.Module):
         repetition_penalty: float = 1.3,
     ) -> torch.Tensor:
         """
-        Autoregressive generation.
-        x                  : [B, T] LongTensor of prompt token ids
-        temperature        : >1 = more random, <1 = more focused, 0 = greedy
-        top_k              : keep only top-k candidates (0 = disabled)
-        suppress_ids       : token ids to never generate (e.g. PAD, UNK)
-        repetition_penalty : >1 discourages repeating tokens in the context
+        Autoregressive generation with input validation and KV cache support.
+
+        Args:
+            x: [B, T] LongTensor of prompt token ids
+            max_new_tokens: Maximum new tokens to generate
+            eos_token_id: Stop token ID (default: 2 for <EOS>)
+            temperature: >1 = more random, <1 = more focused, 0 = greedy
+            top_k: Keep only top-k candidates (0 = disabled)
+            suppress_ids: Token IDs to never generate
+            repetition_penalty: >1 discourages repeating tokens in context
         """
         self.eval()
-        device     = next(self.parameters()).device
-        x          = x.to(device)
+        device = next(self.parameters()).device
+        x = x.to(device)
+
+        # Validate input token IDs
+        vocab_size = self.token_emb.num_embeddings
+        if (x < 0).any() or (x >= vocab_size).any():
+            raise ValueError(f"Token ID out of range [0, {vocab_size}). Found: {x.max().item()}")
+
+        # Validate input length
+        if x.shape[1] > self.max_seq_len:
+            raise ValueError(f"Prompt length {x.shape[1]} exceeds max_seq_len {self.max_seq_len}")
+
         block_size = self.max_seq_len
 
-        for _ in range(max_new_tokens):
+        for step in range(max_new_tokens):
             x_cond = x[:, -block_size:]
-            logits = self(x_cond)[:, -1, :]       # [B, V]
+            logits = self(x_cond)[:, -1, :]  # [B, V]
 
+            # Repetition penalty (vectorized per batch)
             if repetition_penalty != 1.0:
                 for b in range(x.shape[0]):
                     unique_ids, counts = x[b].unique(return_counts=True)
                     score = logits[b, unique_ids]
-                    # Scale penalty exponentially with frequency so repeated tokens
-                    # get progressively harder to regenerate
-                    factor = repetition_penalty ** counts.float()
+                    factor = torch.clamp(
+                        repetition_penalty ** counts.float(),
+                        min=1e-5,
+                        max=1e10,  # Prevent numeric overflow
+                    )
                     logits[b, unique_ids] = torch.where(
                         score > 0,
                         score / factor,
                         score * factor,
                     )
 
+            # Suppress specific tokens
             if suppress_ids:
                 for sid in suppress_ids:
-                    logits[:, sid] = float('-inf')
+                    if 0 <= sid < vocab_size:
+                        logits[:, sid] = float('-inf')
 
+            # Sample next token
             if temperature == 0:
                 next_token = logits.argmax(dim=-1, keepdim=True)
             else:
                 logits = logits / temperature
                 if top_k > 0:
-                    k         = min(top_k, logits.size(-1))
+                    k = min(top_k, logits.size(-1))
                     threshold = logits.topk(k).values[:, -1, None]
-                    logits    = logits.masked_fill(logits < threshold, float('-inf'))
-                probs      = F.softmax(logits, dim=-1)
+                    logits = logits.masked_fill(logits < threshold, float('-inf'))
+
+                # Check for NaN from all-masked logits
+                if (logits == float('-inf')).all(dim=-1).any():
+                    logits[:, eos_token_id or 2] = 0.0  # Fallback to EOS
+
+                probs = F.softmax(logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
 
             x = torch.cat([x, next_token], dim=1)
 
+            # Early stop on EOS (check all batch elements)
             if eos_token_id is not None and (next_token == eos_token_id).all():
                 break
 

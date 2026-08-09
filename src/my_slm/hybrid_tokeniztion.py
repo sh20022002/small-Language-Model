@@ -325,6 +325,7 @@ class HybridTokenizer:
     # Utility / diagnostics
     # ------------------------------------------------------------------
 
+    @property
     def vocab_size(self) -> int:
         return len(self.id2token)
 

@@ -33,38 +33,21 @@ Usage
 python tests/semantic_eval.py --model models/slm.pt --tok tokenizer.pkl.gz --device cuda
 """
 
-import argparse, math, sys, time
+import argparse, math, time
 from pathlib import Path
 from typing import List, Tuple, Optional
 
 import torch
 import torch.nn.functional as F
 
+from my_slm.utils import encode, decode, get_pad_token_id, get_eos_token_id
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Helpers
+# Aliases for backward compatibility with eval functions
 # ──────────────────────────────────────────────────────────────────────────────
-
-def _encode(tok, text: str, max_len: Optional[int] = None) -> List[int]:
-    """Encode text with either HybridTokenizer or a HuggingFace tokenizer."""
-    if hasattr(tok, 'encode') and hasattr(tok, 'token2id'):
-        # HybridTokenizer
-        ids = tok.encode(text, mode='flat')
-    else:
-        # HuggingFace tokenizer fallback
-        ids = tok.encode(text)
-    return ids[:max_len] if max_len else ids
-
-
-def _decode(tok, ids: List[int]) -> str:
-    if hasattr(tok, 'token2id'):
-        return tok.decode(ids)
-    return tok.decode(ids, skip_special_tokens=True)
-
-
-def _pad_id(tok) -> int:
-    if hasattr(tok, 'token2id'):
-        return tok.token2id.get('<PAD>', 0)
-    return tok.pad_token_id or 0
+_encode = encode
+_decode = decode
+_pad_id = get_pad_token_id
 
 
 @torch.no_grad()
@@ -534,31 +517,45 @@ def load_model_and_tok(model_path: str, tok_path: str, device: torch.device):
             raise ValueError(f"Cannot load tokenizer from '{tok_path}': {e}") from e
 
     # ── Model checkpoint ──────────────────────────────────────────────────────
-    ckpt = torch.load(model_path, map_location=device)
+    try:
+        ckpt = torch.load(model_path, map_location=device, weights_only=True)
+    except Exception:
+        # Fallback for older PyTorch versions
+        ckpt = torch.load(model_path, map_location=device)
 
-    if isinstance(ckpt, dict) and 'config' in ckpt:
+    if isinstance(ckpt, dict) and 'config' in ckpt and ckpt['config']:
         # New format: {'config': {...}, 'model_state': state_dict}
         cfg        = ckpt['config']
+        state_dict = ckpt.get('model_state', ckpt)
+    elif isinstance(ckpt, dict) and 'model_state' in ckpt:
+        # Empty config case — infer from weights
         state_dict = ckpt['model_state']
+        emb_shape  = state_dict.get('token_emb.weight', next(iter(state_dict.values()))).shape
+        cfg = {
+            'vocab_size': emb_shape[0],
+            'dim':        emb_shape[1],
+            'depth':      sum(1 for k in state_dict if k.startswith('blocks.') and '.attn.' in k),
+        }
+        # Infer heads from RoPE buffer
+        rope_sin = state_dict.get('blocks.0.attn._rope_sin', torch.zeros(1, 4, 1, 1))
+        cfg['heads'] = rope_sin.shape[1]
+        cfg['mlp_dim'] = cfg['dim'] * 4  # default ratio
+        cfg['window'] = rope_sin.shape[2]
+        print('WARNING: checkpoint config is empty — model config inferred from weights')
     else:
-        # Legacy: plain state_dict — infer vocab_size from embedding weight
+        # Legacy: plain state_dict
         state_dict = ckpt
         emb_shape  = state_dict.get('token_emb.weight', next(iter(state_dict.values()))).shape
         cfg = {
             'vocab_size': emb_shape[0],
             'dim':        emb_shape[1],
-            'depth':      sum(1 for k in state_dict if k.endswith('.attn.qkv.weight')),
+            'depth':      sum(1 for k in state_dict if k.startswith('blocks.') and '.attn.' in k),
         }
-        # Infer heads/mlp_dim from weight shapes
-        qkv_key = next(k for k in state_dict if k.endswith('.attn.qkv.weight'))
-        cfg['heads']   = state_dict.get('blocks.0.attn._rope_sin',
-                                        torch.zeros(1, 4, 1, 1)).shape[1]
-        cfg['mlp_dim'] = int(state_dict[qkv_key].shape[0] / 3 / cfg['dim']
-                             * cfg['dim'] * 1.5)   # rough estimate
-        cfg['window']  = state_dict.get('blocks.0.attn._rope_sin',
-                                        torch.zeros(1, 1, 512, 1)).shape[2]
-        print('WARNING: legacy checkpoint — model config inferred from weights; '
-              'verify output is sensible.')
+        rope_sin = state_dict.get('blocks.0.attn._rope_sin', torch.zeros(1, 4, 1, 1))
+        cfg['heads'] = rope_sin.shape[1]
+        cfg['mlp_dim'] = cfg['dim'] * 4
+        cfg['window'] = rope_sin.shape[2]
+        print('WARNING: legacy checkpoint — model config inferred from weights')
 
     model = Transformer(
         vocab_size = cfg.get('vocab_size', vocab_size),

@@ -43,3 +43,5 @@ scrshots/
 
 # Old development notebooks (training entry point is kaggle_dual_gpu_finetune.ipynb)
 notebooks/
+*.egg-info/
+.claude/

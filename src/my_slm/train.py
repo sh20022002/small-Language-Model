@@ -170,8 +170,19 @@ def load_latest_checkpoint(
         return max(stage_pts, key=lambda p: p.stat().st_mtime)
 
     def _load_state(path):
-        state = torch.load(path, map_location="cpu")
-        raw_model.load_state_dict(state["model_state"], strict=False)
+        try:
+            state = torch.load(path, map_location="cpu", weights_only=True)
+        except Exception:
+            # Fallback for older PyTorch versions
+            state = torch.load(path, map_location="cpu")
+
+        # Load with logging for mismatches
+        missing, unexpected = raw_model.load_state_dict(state.get("model_state", state), strict=False)
+        if missing or unexpected:
+            if missing:
+                _log(f"⚠️  Missing keys in checkpoint: {missing[:3]}{'...' if len(missing) > 3 else ''}")
+            if unexpected:
+                _log(f"⚠️  Unexpected keys in checkpoint: {unexpected[:3]}{'...' if len(unexpected) > 3 else ''}")
         return state
 
     # ── Priority 1: step checkpoint (checkpoint-N/state.pt) ───────────────────
