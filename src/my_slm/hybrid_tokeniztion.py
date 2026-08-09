@@ -275,16 +275,21 @@ class HybridTokenizer:
 
     def decode(self, ids: List[int], skip_special: bool = True) -> str:
         special = set(_SPECIAL)
-        chars: List[str] = []
+        byte_list: List[int] = []
         for idx in ids:
             if idx < 0 or idx >= len(self.id2token):
                 continue
             tok = self.id2token[idx]
             if skip_special and tok in special:
                 continue
-            chars.append(tok)
+            for char in tok:
+                if char in _CHAR2BYTE:
+                    byte_list.append(_CHAR2BYTE[char])
 
-        byte_seq = bytes(_CHAR2BYTE[c] for c in "".join(chars) if c in _CHAR2BYTE)
+        if not byte_list:
+            return ""
+
+        byte_seq = bytes(byte_list)
         return byte_seq.decode("utf-8", errors="replace")
 
     # ------------------------------------------------------------------
