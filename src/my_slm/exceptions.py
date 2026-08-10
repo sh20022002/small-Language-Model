@@ -23,16 +23,30 @@ class TokenizationError(TokenizerError):
     pass
 
 
-class TokenizerNotFrozenError(TokenizerError):
-    """Raised when tokenizer operations require frozen state."""
+class TokenizerNotFrozenError(TokenizerError, RuntimeError):
+    """
+    Raised when tokenizer operations require frozen state.
+
+    Inherits RuntimeError (in addition to TokenizerError) for backward
+    compatibility: HybridTokenizer.encode()/segment() raised plain
+    RuntimeError for this condition before this exception hierarchy
+    existed, and older call sites may still do `except RuntimeError:`.
+    """
 
     def __init__(self, operation: str = "encode"):
         msg = f"Cannot {operation}: tokenizer is not frozen. Call freeze_vocab() first."
         super().__init__(msg)
 
 
-class TokenizerFrozenError(TokenizerError):
-    """Raised when trying to modify a frozen tokenizer."""
+class TokenizerFrozenError(TokenizerError, RuntimeError):
+    """
+    Raised when trying to modify a frozen tokenizer.
+
+    Inherits RuntimeError (in addition to TokenizerError) for backward
+    compatibility: HybridTokenizer.add_text() raised plain RuntimeError for
+    this condition before this exception hierarchy existed, and older call
+    sites may still do `except RuntimeError:`.
+    """
 
     def __init__(self):
         super().__init__(

@@ -10,6 +10,21 @@ from my_slm.utils import (
     save_checkpoint,
     load_checkpoint,
 )
+from my_slm.exceptions import (
+    SLMException,
+    TokenizerError,
+    TokenizationError,
+    TokenizerNotFrozenError,
+    TokenizerFrozenError,
+    VocabSizeError,
+    EncodingError,
+    DecodingError,
+    TrainingError,
+    DatasetError,
+    CheckpointError,
+    CheckpointNotFoundError,
+    ConfigMismatchError,
+)
 
 __all__ = [
     "Transformer",
@@ -20,4 +35,17 @@ __all__ = [
     "get_eos_token_id",
     "save_checkpoint",
     "load_checkpoint",
+    "SLMException",
+    "TokenizerError",
+    "TokenizationError",
+    "TokenizerNotFrozenError",
+    "TokenizerFrozenError",
+    "VocabSizeError",
+    "EncodingError",
+    "DecodingError",
+    "TrainingError",
+    "DatasetError",
+    "CheckpointError",
+    "CheckpointNotFoundError",
+    "ConfigMismatchError",
 ]

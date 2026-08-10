@@ -362,14 +362,16 @@ class TestRegressionBenchmarks:
             _ = tok.encode(text)
         elapsed = time.time() - start
 
-        throughput = (len(text.split()) * 100) / elapsed
-
-        # Set a baseline (should improve or stay roughly same)
-        baseline = 100  # tokens/sec
-        print(f"\nEncode performance: {throughput:.0f} tokens/sec (baseline: {baseline})")
-
-        # Allow up to 2x slower (indicates regression)
-        assert throughput > baseline / 2
+        if elapsed > 0:
+            throughput = (len(text.split()) * 100) / elapsed
+            baseline = 100  # tokens/sec
+            print(f"\nEncode performance: {throughput:.0f} tokens/sec (baseline: {baseline})")
+            # Allow up to 2x slower (indicates regression)
+            assert throughput > baseline / 2
+        else:
+            # Encoding was so fast it was unmeasurable
+            print(f"\nEncode performance: immeasurably fast (< {1000000} tokens/sec)")
+            assert True
 
     def test_model_forward_regression(self):
         """Check that forward pass doesn't degrade."""

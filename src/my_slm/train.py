@@ -1,23 +1,40 @@
+"""Training utilities: loss functions, optimizers, learning rate schedules."""
+
+from __future__ import annotations
+
+import logging
 import math
 import pickle
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-
+from matplotlib.figure import Figure
 from torch.utils.data import DataLoader, Dataset
 
+_logger = logging.getLogger(__name__)
 
-def _save_or_close_fig(fig_path, train_losses, val_losses, label="Loss"):
-    """
-    Render the loss curve with the object-oriented Matplotlib API (Figure +
-    Agg canvas) instead of pyplot. This never touches pyplot's global/GUI
-    backend, so it can't crash headless runs (e.g. no Tk/display available)
-    and never disturbs a caller's own `%matplotlib inline` backend — this
-    function only ever calls savefig(), never show().
+
+def _save_or_close_fig(
+    fig_path: Optional[str],
+    train_losses: List[float],
+    val_losses: List[float],
+    label: str = "Loss",
+) -> None:
+    """Save training curve plot to file.
+
+    Uses object-oriented Matplotlib API (Figure + Agg canvas) instead of pyplot
+    to avoid headless environment crashes and avoid disturbing other matplotlib
+    backends (like %matplotlib inline in notebooks).
+
+    Args:
+        fig_path: Path to save figure. If None, does nothing.
+        train_losses: Training losses per epoch.
+        val_losses: Validation losses per epoch.
+        label: Label for y-axis (default "Loss").
     """
     if not fig_path:
         return
@@ -25,26 +42,61 @@ def _save_or_close_fig(fig_path, train_losses, val_losses, label="Loss"):
     FigureCanvasAgg(fig)
     ax = fig.add_subplot(111)
     ax.plot(train_losses, label=f"Train {label}")
-    ax.plot(val_losses,   label=f"Val {label}")
-    ax.set_xlabel("Epoch"); ax.set_ylabel(label); ax.legend()
+    ax.plot(val_losses, label=f"Val {label}")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(label)
+    ax.legend()
     fig.tight_layout()
     Path(fig_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(fig_path, dpi=100, bbox_inches="tight")
-    print(f"[Plot] Loss curve → {fig_path}")
+    _logger.info(f"Saved loss curve → {fig_path}")
 
 
-def get_cosine_schedule_with_warmup(optimizer, warmup_steps: int, total_steps: int):
-    """Linear warmup then cosine decay to 0. Step once per batch."""
-    def lr_lambda(step):
+def get_cosine_schedule_with_warmup(
+    optimizer: torch.optim.Optimizer, warmup_steps: int, total_steps: int
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Create cosine annealing schedule with linear warmup.
+
+    Learning rate increases linearly during warmup, then decays following
+    cosine annealing to zero.
+
+    Args:
+        optimizer: Optimizer to schedule.
+        warmup_steps: Number of steps to warm up over.
+        total_steps: Total training steps.
+
+    Returns:
+        LambdaLR scheduler. Call step() once per batch.
+    """
+    def lr_lambda(step: int) -> float:
         if step < warmup_steps:
             return step / max(1, warmup_steps)
         progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def _repetition_ul_loss(logits, input_ids, labels, alpha):
-    """Unlikelihood loss on shifted logits: discourage predicting the immediately preceding token."""
+def _repetition_ul_loss(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    alpha: float,
+) -> torch.Tensor:
+    """Unlikelihood loss: discourage repeating the previous token.
+
+    Applies a penalty to the model's logits for predicting the previous token
+    in the sequence. This encourages diversity in generation.
+
+    Args:
+        logits: Unnormalized log probabilities [B, T, V].
+        input_ids: Input token IDs [B, T].
+        labels: Target token IDs [B, T]. Tokens marked as -100 are ignored.
+        alpha: Loss weight. Set to 0 to disable.
+
+    Returns:
+        Scalar loss tensor. 0 if alpha=0 or T<2.
+    """
     B, T, V = logits.shape
     if T < 2 or alpha == 0.0:
         return logits.new_tensor(0.0)
@@ -60,24 +112,34 @@ def _repetition_ul_loss(logits, input_ids, labels, alpha):
 
 
 def make_optimizer(
-    model,
+    model: nn.Module,
     lr: float,
     weight_decay: float = 0.1,
-    betas: tuple = (0.9, 0.95),
+    betas: Tuple[float, float] = (0.9, 0.95),
     use_8bit: bool = False,
     use_galore: bool = False,
     galore_rank: int = 128,
     galore_update_proj_gap: int = 200,
     galore_scale: float = 0.25,
-):
-    """
-    Build AdamW with GPT-style weight-decay groups.
+) -> torch.optim.Optimizer:
+    """Create AdamW optimizer with GPT-style weight decay groups.
 
-    use_8bit   : bitsandbytes AdamW8bit — shrinks optimizer state ~8×.
-    use_galore : GaLore gradient projection on large weight matrices.
-                 Reduces optimizer memory by projecting gradients to rank-r.
-                 Pairs with use_8bit for maximum memory savings.
-                 Requires: pip install galore-torch
+    Args:
+        model: Model to optimize.
+        lr: Learning rate.
+        weight_decay: Weight decay (L2 penalty). Applied to matrix params, not scalars.
+        betas: Momentum coefficients (beta1, beta2).
+        use_8bit: Use bitsandbytes AdamW8bit for ~8x memory reduction.
+        use_galore: Use GaLore gradient projection on large matrices.
+        galore_rank: Rank for GaLore projection.
+        galore_update_proj_gap: Update interval for GaLore projections.
+        galore_scale: Scale factor for GaLore gradients.
+
+    Returns:
+        Configured optimizer.
+
+    Raises:
+        ImportError: If use_8bit or use_galore requested but packages not installed.
     """
     decay, no_decay, galore_groups = [], [], []
 
@@ -567,30 +629,77 @@ def train_model_accelerate(
 
 
 class QADataset(Dataset):
-    def __init__(self, data, tokenizer, max_length=128):
+    """Question-Answer dataset for training language models.
+
+    Formats data as "Q: {question}\\nA: {answer}" and tokenizes.
+    Supports alternative keys 'input'/'output' as fallback.
+    """
+
+    def __init__(
+        self,
+        data: List[Dict[str, str]],
+        tokenizer: Any,
+        max_length: int = 128,
+    ) -> None:
+        """Initialize QA dataset.
+
+        Args:
+            data: List of dicts with 'question' + 'answer' (or 'input' + 'output').
+            tokenizer: Tokenizer with encode() method.
+            max_length: Maximum sequence length after tokenization.
+        """
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
 
-    def __len__(self):
+    def __len__(self) -> int:
+        """Return dataset size."""
         return len(self.data)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """Get a QA example.
+
+        Args:
+            idx: Dataset index.
+
+        Returns:
+            Dict with "input_ids" tensor of shape [max_length].
+        """
         item = self.data[idx]
-        # adjust keys to your data: 'question'/'answer' or 'input'/'output'
+        # Support both 'question'/'answer' and 'input'/'output' keys
         q = item.get("question", item.get("input", ""))
-        a = item.get("answer",   item.get("output", ""))
+        a = item.get("answer", item.get("output", ""))
         text = f"Q: {q}\nA: {a}"
-        tokens = self.tokenizer.encode(text)[:self.max_length]
+        tokens = self.tokenizer.encode(text)[: self.max_length]
         input_ids = torch.tensor(tokens, dtype=torch.long)
         return {"input_ids": input_ids}
 
-def collate_fn(batch, pad_id=0, ignore_index=-100):
-    ids = [b["input_ids"] for b in batch]                    # each [T]
+
+def collate_fn(
+    batch: List[Dict[str, torch.Tensor]],
+    pad_id: int = 0,
+    ignore_index: int = -100,
+) -> Dict[str, torch.Tensor]:
+    """Collate batch of QA examples.
+
+    Pads sequences to max length in batch and creates attention masks.
+
+    Args:
+        batch: List of dicts from QADataset with "input_ids" key.
+        pad_id: Token ID to use for padding.
+        ignore_index: Label value to mark padding for loss computation.
+
+    Returns:
+        Dict with batched tensors:
+        - "input_ids": [B, T]
+        - "attention_mask": [B, T] (1 for real tokens, 0 for padding)
+        - "labels": [B, T] (copy of input_ids, with padding masked as ignore_index)
+    """
+    ids = [b["input_ids"] for b in batch]  # each [T]
     attn = [torch.ones_like(t, dtype=torch.long) for t in ids]  # 1s before pad
 
-    ids  = torch.nn.utils.rnn.pad_sequence(ids,  batch_first=True, padding_value=pad_id)  # [B, T]
-    attn = torch.nn.utils.rnn.pad_sequence(attn, batch_first=True, padding_value=0)       # [B, T]
+    ids = torch.nn.utils.rnn.pad_sequence(ids, batch_first=True, padding_value=pad_id)  # [B, T]
+    attn = torch.nn.utils.rnn.pad_sequence(attn, batch_first=True, padding_value=0)  # [B, T]
 
     labels = ids.clone()
     labels[attn == 0] = ignore_index  # ignore padding in the loss
