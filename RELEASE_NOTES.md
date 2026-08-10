@@ -42,7 +42,6 @@ Centralizes common operations for both HybridTokenizer and HuggingFace tokenizer
 **Additional utilities:**
 - `compute_tokenizer_hash()` — Validates tokenizer vocab consistency
 - `validate_path()` — Prevents path traversal attacks
-- `load_model_safely()` — Single-call model loading with proper error handling
 
 ### 2. Exception Hierarchy (`src/my_slm/exceptions.py`)
 
