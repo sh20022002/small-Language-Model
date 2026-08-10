@@ -267,7 +267,7 @@ class TestNotebookCompatibility:
         """Test tokenizer creation like in notebook."""
         tok = HybridTokenizer()
         tok.add_text("test data " * 100)
-        tok.freeze_vocab(256)
+        tok.freeze_vocab(512)
 
         assert tok.vocab_size > 0
 
@@ -321,11 +321,10 @@ class TestNotebookCompatibility:
 
     def test_dict_unpacking_kwargs_pattern(self):
         """Test dictionary unpacking pattern used in notebooks."""
-        config = {"vocab_size": 256, "dim": 64, "depth": 2, "heads": 4,
-                 "mlp_dim": 128, "window": 16}
+        config = {"num_embeddings": 256, "embedding_dim": 64}
 
         model = torch.nn.Embedding(**config)
-        # Should work (Embedding accepts vocab_size, embedding_dim)
+        # Should work (Embedding accepts num_embeddings, embedding_dim)
         assert model is not None
 
 

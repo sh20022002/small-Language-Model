@@ -1,4 +1,10 @@
+"""Transformer architecture: attention, feed-forward, and model components."""
+
+from __future__ import annotations
+
 import math
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,23 +12,54 @@ from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-8):
+    """RMS (Root Mean Square) Layer Normalization.
+
+    More stable than Layer Norm, used in modern models like LLaMA.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-8) -> None:
+        """Initialize RMSNorm layer.
+
+        Args:
+            dim: Feature dimension.
+            eps: Small constant for numerical stability.
+        """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply RMS normalization.
+
+        Args:
+            x: Input tensor of any shape.
+
+        Returns:
+            Normalized tensor with same shape as input.
+        """
         norm = (x.pow(2).mean(dim=-1, keepdim=True) + self.eps).sqrt()
         return self.weight * x / norm
 
 
 class RoPE:
     """
+    Rotary Position Embeddings (RoPE) helper.
+
     Static helper kept for backward-compat (tests import RoPE.apply).
     MultiHeadAttention uses precomputed buffers instead — see _apply_rope.
     """
+
     @staticmethod
-    def apply(x, seq_dim=2):
+    def apply(x: torch.Tensor, seq_dim: int = 2) -> torch.Tensor:
+        """Apply RoPE to tensor x.
+
+        Args:
+            x: Tensor to rotate.
+            seq_dim: Sequence dimension (default 2 for [B, H, T, D]).
+
+        Returns:
+            Rotated tensor with same shape.
+        """
         dim = x.shape[-1] // 2
         sinusoid = RoPE._get_sinusoid_embedding(x.shape[seq_dim], dim, x.device)
         x1, x2 = x[..., ::2], x[..., 1::2]
@@ -31,7 +68,19 @@ class RoPE:
         return x_rope.flatten(-2)
 
     @staticmethod
-    def _get_sinusoid_embedding(seq_len, dim, device):
+    def _get_sinusoid_embedding(
+        seq_len: int, dim: int, device: torch.device
+    ) -> torch.Tensor:
+        """Generate sinusoidal position embeddings.
+
+        Args:
+            seq_len: Sequence length.
+            dim: Embedding dimension.
+            device: Device to create tensor on.
+
+        Returns:
+            Tensor of shape [seq_len, dim, 2] with sin/cos pairs.
+        """
         theta = 10000 ** (-torch.arange(0, dim, device=device) / dim)
         positions = torch.arange(seq_len, device=device).unsqueeze(-1)
         angle_rates = positions * theta
@@ -39,116 +88,269 @@ class RoPE:
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, heads, window, dropout=0.0, kv_heads=None):
+    """Multi-head attention with grouped-query attention (GQA) and local windowing.
+
+    Supports:
+    - Standard multi-head attention (kv_heads == heads)
+    - Grouped-query attention (kv_heads < heads) for memory efficiency
+    - Causal + local windowing for efficient long sequences
+    - RoPE for position encoding
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        heads: int,
+        window: int,
+        dropout: float = 0.0,
+        kv_heads: Optional[int] = None,
+    ) -> None:
+        """Initialize multi-head attention layer.
+
+        Args:
+            dim: Model dimension (must be divisible by heads).
+            heads: Number of attention heads.
+            window: Local attention window size.
+            dropout: Attention dropout probability.
+            kv_heads: Number of KV heads for GQA. If None, equals heads.
+
+        Raises:
+            AssertionError: If heads not divisible by kv_heads.
+        """
         super().__init__()
-        self.heads    = heads
-        # GQA: kv_heads < heads → each KV head is shared by (heads // kv_heads) Q heads.
-        # kv_heads == heads (default) → standard multi-head attention.
+        self.heads = heads
         self.kv_heads = kv_heads if kv_heads is not None else heads
         assert heads % self.kv_heads == 0, "heads must be divisible by kv_heads"
-        self.head_dim  = dim // heads
-        self.window    = window
+        self.head_dim = dim // heads
+        self.window = window
         self.dropout_p = dropout
 
-        # Separate Q and KV projections so KV can have fewer heads (GQA / MQA).
-        self.q  = nn.Linear(dim, dim, bias=False)
+        # Separate Q and KV projections for GQA.
+        self.q = nn.Linear(dim, dim, bias=False)
         self.kv = nn.Linear(dim, 2 * self.kv_heads * self.head_dim, bias=False)
         self.out = nn.Linear(dim, dim, bias=False)
 
-        # Precomputed RoPE buffers — head_dim is the same for Q and KV.
-        half  = self.head_dim // 2
+        # Precomputed RoPE buffers.
+        half = self.head_dim // 2
         theta = 10_000.0 ** (-torch.arange(half) / half)
-        pos   = torch.arange(window)
-        freq  = torch.outer(pos, theta)
-        self.register_buffer('_rope_sin', freq.sin().unsqueeze(0).unsqueeze(0))
-        self.register_buffer('_rope_cos', freq.cos().unsqueeze(0).unsqueeze(0))
+        pos = torch.arange(window)
+        freq = torch.outer(pos, theta)
+        self.register_buffer("_rope_sin", freq.sin().unsqueeze(0).unsqueeze(0))
+        self.register_buffer("_rope_cos", freq.cos().unsqueeze(0).unsqueeze(0))
 
     def _apply_rope(self, x: torch.Tensor) -> torch.Tensor:
-        """x: [B, H, T, D] → rotated [B, H, T, D].  Works for any H (Q or KV heads)."""
-        T   = x.shape[2]
+        """Apply RoPE rotation to attention heads.
+
+        Args:
+            x: Tensor of shape [B, H, T, D].
+
+        Returns:
+            Rotated tensor with same shape.
+        """
+        T = x.shape[2]
         sin = self._rope_sin[:, :, :T, :]
         cos = self._rope_cos[:, :, :T, :]
         x1, x2 = x[..., ::2], x[..., 1::2]
-        return torch.stack([x1 * cos - x2 * sin,
-                            x1 * sin + x2 * cos], dim=-1).flatten(-2)
+        return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1).flatten(
+            -2
+        )
 
-    def forward(self, x, attention_mask=None):
+    def forward(
+        self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Compute multi-head attention.
+
+        Args:
+            x: Input tensor of shape [B, T, C].
+            attention_mask: Padding mask of shape [B, T]. 1 = attend, 0 = mask.
+
+        Returns:
+            Attention output of shape [B, T, C].
+        """
         B, T, C = x.shape
         H, KVH, D = self.heads, self.kv_heads, self.head_dim
 
-        q  = self.q(x).view(B, T, H, D).transpose(1, 2)                 # [B, H,   T, D]
+        q = self.q(x).view(B, T, H, D).transpose(1, 2)  # [B, H, T, D]
         kv = self.kv(x).view(B, T, 2, KVH, D).permute(2, 0, 3, 1, 4)  # [2, B, KVH, T, D]
         k, v = kv[0], kv[1]
 
         q = self._apply_rope(q)
         k = self._apply_rope(k)
 
-        # GQA: broadcast KV heads to match Q heads via repeat_interleave.
+        # GQA: broadcast KV heads to match Q heads.
         if KVH < H:
             rep = H // KVH
-            k = k.repeat_interleave(rep, dim=1)   # [B, H, T, D]
+            k = k.repeat_interleave(rep, dim=1)  # [B, H, T, D]
             v = v.repeat_interleave(rep, dim=1)
 
         causal_mask = self._causal_local_mask(T, self.window, x.device)
         if attention_mask is not None:
-            pad_mask    = attention_mask[:, None, None, :].bool()
+            pad_mask = attention_mask[:, None, None, :].bool()
             causal_mask = causal_mask & pad_mask
 
-        dp  = self.dropout_p if self.training else 0.0
-        out = F.scaled_dot_product_attention(q, k, v,
-                                             attn_mask=causal_mask,
-                                             dropout_p=dp)
+        dp = self.dropout_p if self.training else 0.0
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=causal_mask, dropout_p=dp)
         return self.out(out.transpose(1, 2).contiguous().view(B, T, C))
 
     @staticmethod
-    def _causal_local_mask(T, W, device):
+    def _causal_local_mask(
+        T: int, W: int, device: torch.device
+    ) -> torch.Tensor:
+        """Create causal + local attention mask.
+
+        Attention is allowed within a sliding window and only to past positions.
+
+        Args:
+            T: Sequence length.
+            W: Window size.
+            device: Device to create tensor on.
+
+        Returns:
+            Mask tensor of shape [1, 1, T, T] with dtype bool.
+        """
         m = torch.tril(torch.ones(T, T, device=device, dtype=torch.bool))
         return torch.triu(m, diagonal=-W)[None, None]
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout=0.0):
-        super().__init__()
-        # SwiGLU: inner dim scaled to 2/3 so total params ≈ standard FFN
-        inner = int(hidden_dim * 2 / 3)
-        self.gate  = nn.Linear(dim, inner, bias=False)
-        self.value = nn.Linear(dim, inner, bias=False)
-        self.proj  = nn.Linear(inner, dim, bias=False)
-        self.drop  = nn.Dropout(dropout)
+    """Feed-forward network with SwiGLU activation.
 
-    def forward(self, x):
+    Uses gating mechanism with SiLU activation for better expressivity.
+    """
+
+    def __init__(self, dim: int, hidden_dim: int, dropout: float = 0.0) -> None:
+        """Initialize feed-forward network.
+
+        Args:
+            dim: Input/output dimension.
+            hidden_dim: Hidden layer dimension (scaled to 2/3 for SwiGLU).
+            dropout: Dropout probability.
+        """
+        super().__init__()
+        # SwiGLU: inner = 2/3 * hidden_dim so total params ≈ standard FFN
+        inner = int(hidden_dim * 2 / 3)
+        self.gate = nn.Linear(dim, inner, bias=False)
+        self.value = nn.Linear(dim, inner, bias=False)
+        self.proj = nn.Linear(inner, dim, bias=False)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply feed-forward with SwiGLU.
+
+        Args:
+            x: Input tensor.
+
+        Returns:
+            Output tensor with same shape.
+        """
         return self.drop(self.proj(F.silu(self.gate(x)) * self.value(x)))
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, heads, mlp_dim, window, kv_heads=None, dropout=0.0):
+    """Transformer block: pre-norm attention + pre-norm feed-forward.
+
+    Uses residual connections and RMS normalization for stability.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        heads: int,
+        mlp_dim: int,
+        window: int,
+        kv_heads: Optional[int] = None,
+        dropout: float = 0.0,
+    ) -> None:
+        """Initialize transformer block.
+
+        Args:
+            dim: Model dimension.
+            heads: Number of attention heads.
+            mlp_dim: Feed-forward hidden dimension.
+            window: Attention window size.
+            kv_heads: Number of KV heads for GQA.
+            dropout: Dropout probability.
+        """
         super().__init__()
         self.norm1 = RMSNorm(dim)
-        self.attn  = MultiHeadAttention(dim, heads, window, dropout, kv_heads=kv_heads)
+        self.attn = MultiHeadAttention(dim, heads, window, dropout, kv_heads=kv_heads)
         self.norm2 = RMSNorm(dim)
-        self.ff    = FeedForward(dim, mlp_dim, dropout)
+        self.ff = FeedForward(dim, mlp_dim, dropout)
 
-    def forward(self, x, attention_mask=None):
+    def forward(
+        self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Apply transformer block.
+
+        Args:
+            x: Input tensor of shape [B, T, C].
+            attention_mask: Optional padding mask of shape [B, T].
+
+        Returns:
+            Output tensor with same shape.
+        """
         x = x + self.attn(self.norm1(x), attention_mask=attention_mask)
         x = x + self.ff(self.norm2(x))
         return x
 
 
 class Transformer(nn.Module):
-    def __init__(self, vocab_size, dim, depth, heads, mlp_dim, window,
-                 kv_heads=None, dropout=0.0, tie_weights=True, use_checkpoint=False):
+    """Transformer language model.
+
+    Features:
+    - Multi-head attention with GQA (grouped-query attention)
+    - Local causal windowing for efficient long sequences
+    - RoPE position embeddings
+    - Pre-norm architecture with residual connections
+    - Weight tying (GPT-2 / LLaMA style)
+    - Gradient checkpointing support for memory efficiency
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        dim: int,
+        depth: int,
+        heads: int,
+        mlp_dim: int,
+        window: int,
+        kv_heads: Optional[int] = None,
+        dropout: float = 0.0,
+        tie_weights: bool = True,
+        use_checkpoint: bool = False,
+    ) -> None:
+        """Initialize Transformer model.
+
+        Args:
+            vocab_size: Size of token vocabulary.
+            dim: Model embedding dimension.
+            depth: Number of transformer blocks.
+            heads: Number of attention heads.
+            mlp_dim: Feed-forward hidden dimension.
+            window: Attention window size (local causal attention).
+            kv_heads: Number of KV heads for GQA. If None, equals heads.
+            dropout: Dropout probability.
+            tie_weights: If True, share embedding and output weights.
+            use_checkpoint: If True, use gradient checkpointing during training.
+        """
         super().__init__()
         self.use_checkpoint = use_checkpoint
-        self.max_seq_len    = window
-        self.depth          = depth
+        self.max_seq_len = window
+        self.depth = depth
+        self.vocab_size = vocab_size
+        self.dim = dim
+
         self.token_emb = nn.Embedding(vocab_size, dim)
-        self.drop      = nn.Dropout(dropout)
-        self.blocks    = nn.ModuleList([
-            TransformerBlock(dim, heads, mlp_dim, window,
-                             kv_heads=kv_heads, dropout=dropout)
-            for _ in range(depth)
-        ])
-        self.norm      = RMSNorm(dim)
+        self.drop = nn.Dropout(dropout)
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(
+                    dim, heads, mlp_dim, window, kv_heads=kv_heads, dropout=dropout
+                )
+                for _ in range(depth)
+            ]
+        )
+        self.norm = RMSNorm(dim)
         self.to_logits = nn.Linear(dim, vocab_size, bias=False)
 
         # Weight tying: shared embedding ↔ output projection (GPT-2 / LLaMA style)
@@ -157,17 +359,19 @@ class Transformer(nn.Module):
 
         self._init_weights()
 
-    def _init_weights(self):
-        # Standard 0.02 init for most layers.
-        # Residual output projections (attention.out, FFN.proj) use depth-scaled
-        # std = 0.02 / sqrt(2 * depth) to prevent variance blow-up at init
-        # (GPT-2 paper §2.3; also used in LLaMA, Mistral).
+    def _init_weights(self) -> None:
+        """Initialize weights using scaled normal distribution.
+
+        Standard 0.02 init for most layers. Residual output projections
+        (attention.out, FFN.proj) use depth-scaled std to prevent variance
+        blow-up at initialization (GPT-2 paper §2.3; LLaMA, Mistral).
+        """
         residual_std = 0.02 / math.sqrt(2 * self.depth)
 
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
-                # out-projection of attention and final FF proj feed into residual stream
-                is_residual = name.endswith(('.attn.out', '.ff.proj'))  # same names post-GQA
+                # Residual projections get scaled init
+                is_residual = name.endswith((".attn.out", ".ff.proj"))
                 std = residual_std if is_residual else 0.02
                 nn.init.normal_(module.weight, mean=0.0, std=std)
                 if module.bias is not None:
@@ -175,7 +379,24 @@ class Transformer(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, x, attention_mask=None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute model logits.
+
+        Args:
+            x: Input tensor. Either [B, T] token IDs or [B, T, C] embeddings.
+            attention_mask: Optional padding mask [B, T]. 1 = attend, 0 = mask.
+
+        Returns:
+            Logits of shape [B, T, vocab_size].
+
+        Raises:
+            AssertionError: If input shape is invalid.
+        """
+        # Embed token IDs if needed
         if x.dim() == 2 and x.dtype in (torch.long, torch.int64):
             x = self.token_emb(x)
         assert x.dim() == 3, f"expected [B,T,C], got {tuple(x.shape)}"
@@ -183,8 +404,7 @@ class Transformer(nn.Module):
         x = self.drop(x)
         for block in self.blocks:
             if self.use_checkpoint and self.training:
-                x = gradient_checkpoint(block, x, attention_mask,
-                                        use_reentrant=False)
+                x = gradient_checkpoint(block, x, attention_mask, use_reentrant=False)
             else:
                 x = block(x, attention_mask=attention_mask)
         x = self.norm(x)
@@ -279,20 +499,34 @@ class Transformer(nn.Module):
 
         return x
 
-    def set_dropout(self, p: float):
-        """Update dropout probability in all layers; call before fine-tuning."""
+    def set_dropout(self, p: float) -> None:
+        """Update dropout probability in all layers.
+
+        Call before fine-tuning to change regularization strength.
+
+        Args:
+            p: New dropout probability.
+        """
         for m in self.modules():
             if isinstance(m, nn.Dropout):
                 m.p = p
 
-    def resize_token_embeddings(self, new_size: int):
+    def resize_token_embeddings(self, new_size: int) -> None:
+        """Resize token embeddings and output projection.
+
+        Used when vocab size changes after model creation. Preserves old weights
+        and initializes new rows. Re-ties weights if they were previously tied.
+
+        Args:
+            new_size: New vocabulary size.
+        """
         old_emb = self.token_emb
         old_n, dim = old_emb.num_embeddings, old_emb.embedding_dim
         if new_size == old_n:
             return
 
         device = old_emb.weight.device
-        dtype  = old_emb.weight.dtype
+        dtype = old_emb.weight.dtype
 
         new_emb = nn.Embedding(new_size, dim, device=device, dtype=dtype)
         num_copy = min(old_n, new_size)

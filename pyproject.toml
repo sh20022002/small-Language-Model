@@ -12,7 +12,12 @@ license = { text = "MIT" }
 requires-python = ">=3.8"
 keywords = ["tokenizer", "nlp", "transformer", "pytorch"]
 dependencies = [
-    "torch>=2.0",
+    # torch>=2.6 is a hard floor, not a style choice: CVE-2025-32434 is a
+    # critical (CVSS 9.3) RCE in torch.load() that affects every version
+    # <=2.5.1 EVEN WHEN weights_only=True is passed. This project loads
+    # checkpoints from Kaggle datasets that may be attached by third
+    # parties, so the fix must not be optional. See SECURITY.md.
+    "torch>=2.6.0",
     "numpy>=1.21",
     "tqdm>=4.60",
     "matplotlib>=3.5",

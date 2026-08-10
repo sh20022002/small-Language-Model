@@ -33,7 +33,7 @@ Usage
 python tests/semantic_eval.py --model models/slm.pt --tok tokenizer.pkl.gz --device cuda
 """
 
-import argparse, math, time
+import argparse, math, pickle, time
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -517,10 +517,25 @@ def load_model_and_tok(model_path: str, tok_path: str, device: torch.device):
             raise ValueError(f"Cannot load tokenizer from '{tok_path}': {e}") from e
 
     # ── Model checkpoint ──────────────────────────────────────────────────────
+    # weights_only=True is a security boundary, not a compatibility flag —
+    # see CVE-2025-32434 (torch.load RCE, fixed in torch 2.6). Never fall
+    # back to a full unpickle just because the safe load failed; that
+    # silently reintroduces arbitrary code execution for checkpoints from
+    # untrusted sources (e.g. a Kaggle dataset attached by someone else).
     try:
         ckpt = torch.load(model_path, map_location=device, weights_only=True)
-    except Exception:
-        # Fallback for older PyTorch versions
+    except pickle.UnpicklingError as e:
+        raise RuntimeError(
+            f"Refusing to load {model_path}: weights_only=True rejected its "
+            f"contents ({e}). If you trust this file's origin, load it "
+            f"explicitly with weights_only=False yourself — this is not "
+            f"done automatically. See SECURITY.md."
+        ) from e
+    except TypeError:
+        # Only reached on torch<2.1 (no weights_only kwarg). pyproject.toml
+        # now requires torch>=2.6, so this is defense-in-depth only.
+        print("WARNING: torch.load() has no weights_only kwarg on this "
+              "PyTorch version — upgrade to torch>=2.6 (see SECURITY.md).")
         ckpt = torch.load(model_path, map_location=device)
 
     if isinstance(ckpt, dict) and 'config' in ckpt and ckpt['config']:

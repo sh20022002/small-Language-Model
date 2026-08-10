@@ -1,4 +1,5 @@
 import math
+import pickle
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -181,8 +182,29 @@ def load_latest_checkpoint(
     def _load_state(path):
         try:
             state = torch.load(path, map_location="cpu", weights_only=True)
-        except Exception:
-            # Fallback for older PyTorch versions
+        except pickle.UnpicklingError as e:
+            # weights_only=True refused to unpickle something in this file.
+            # Do NOT silently retry with weights_only=False — on torch<2.6
+            # that path (and even weights_only=True pre-2.6, see
+            # CVE-2025-32434) can execute arbitrary code from a malicious
+            # checkpoint. Checkpoints here may come from Kaggle datasets
+            # attached by someone other than the notebook owner, so fail
+            # loudly instead of quietly deserializing untrusted pickle data.
+            raise RuntimeError(
+                f"Refusing to load {path}: weights_only=True rejected its "
+                f"contents ({e}). If you trust this file's origin and need "
+                f"to load it anyway, do so explicitly with "
+                f"torch.load(path, weights_only=False) — never as a silent "
+                f"fallback. See SECURITY.md."
+            ) from e
+        except TypeError:
+            # Only torch<2.1 (no weights_only kwarg at all) lands here — a
+            # real API-compatibility case, not a masked deserialization
+            # failure. torch>=2.6 is required by pyproject.toml, so this is
+            # effectively dead code kept for defense in depth.
+            _log(f"⚠️  torch.load() has no weights_only kwarg on this PyTorch "
+                 f"version — upgrade to torch>=2.6 (see SECURITY.md). "
+                 f"Loading {path} without weights_only protection.")
             state = torch.load(path, map_location="cpu")
 
         # Load with logging for mismatches
