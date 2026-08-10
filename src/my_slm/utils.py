@@ -226,31 +226,3 @@ def validate_path(path_str: str, must_exist: bool = True) -> Path:
     if p.is_dir():
         raise ValueError(f"Expected file, got directory: {p}")
     return p
-
-
-def load_model_safely(model_path: str, model_class, device: str = "cpu", **model_kwargs):
-    """
-    Load model checkpoint safely with validation.
-
-    Args:
-        model_path: Path to checkpoint
-        model_class: Model class to instantiate
-        device: Device to load to
-        **model_kwargs: Additional model constructor arguments
-
-    Returns:
-        model: Loaded model
-    """
-    ckpt_path = validate_path(model_path)
-
-    # Handle directory (new format) or file (old format)
-    if ckpt_path.is_dir():
-        model = model_class(**model_kwargs).to(device)
-        config, _ = load_checkpoint(ckpt_path, model, device=device)
-        return model
-    else:
-        # Old format: bare state dict
-        model = model_class(**model_kwargs).to(device)
-        state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
-        model.load_state_dict(state_dict, strict=False)
-        return model
