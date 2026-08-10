@@ -78,28 +78,36 @@ MAX_GRAD_NORM = 1.0
 
 ## Repo layout
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full module map, data flow,
+and extension points. Summary:
+
 ```
 small-Language-Model/
 ├── kaggle_dual_gpu_finetune.ipynb   # primary training notebook (Kaggle 2×T4)
 ├── pyproject.toml
-├── README.md
+├── README.md / ARCHITECTURE.md / SECURITY.md
+├── Makefile / .pre-commit-config.yaml / .github/workflows/  # CI, lint, packaging
+├── scripts/                         # notebook/import validation helpers used by CI
 ├── docs/design/
 │   ├── dinoLM.md                    # future: DINO-style self-supervised LM
 │   └── tellm.md                     # future: personalized-business chatbot
 ├── tests/
 │   ├── conftest.py
-│   ├── mfu.py
-│   ├── semantic_eval.py
-│   ├── test_model.py
-│   └── test_training.py
+│   ├── mfu.py / semantic_eval.py    # thin re-exports of my_slm.mfu / my_slm.semantic_eval
+│   ├── test_model.py / test_training.py
+│   └── test_*_edge_cases.py / test_*_robustness.py / test_kaggle_environment.py / test_performance_benchmarks.py
 └── src/my_slm/
-    ├── __init__.py
+    ├── __init__.py                  # public API surface (see ARCHITECTURE.md)
     ├── transformer.py               # Transformer, GQA, RoPE, SwiGLU
     ├── train.py                     # training loop, GaLore optimizer, adaptive epochs
     ├── multi_train_orchestrator.py  # dataset loaders, PackedTokenDataset, curriculum
     ├── hybrid_tokeniztion.py        # HybridTokenizer (UTF-8 byte fallback)
+    ├── utils.py                     # shared encode/decode/checkpoint helpers
+    ├── exceptions.py                # SLMException hierarchy
     ├── benchmark_logger.py
-    └── create_t_f.py
+    ├── semantic_eval.py             # perplexity/BLiMP/LAMBADA/analogy eval suite
+    ├── mfu.py                       # GPU TFLOPS / model-flops-utilization probe
+    └── create_t_f.py                # wikidump2txt: Wikipedia dump → plain text
 ```
 
 ---

@@ -108,8 +108,9 @@ def validate_notebook_imports(notebook_path: Path) -> tuple[bool, list[str]]:
     # Project modules
     project_modules = {"my_slm"}
 
-    # External dependencies (from pyproject.toml)
-    external_modules = {"torch", "numpy", "tqdm", "pandas", "sklearn"}
+    # External dependencies (from pyproject.toml's [project.dependencies]).
+    # Keep this in sync with pyproject.toml — it's the source of truth.
+    external_modules = {"torch", "numpy", "tqdm", "matplotlib"}
 
     # Check each import
     problematic = []
