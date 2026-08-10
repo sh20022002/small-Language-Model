@@ -116,7 +116,7 @@ trained Transformer weights
    ▼
 checkpoint on disk (models/*.pt or a checkpoint/ directory)
    │
-   ├─ load_checkpoint() / load_model_safely() (my_slm.utils)     → resume training
+   ├─ load_checkpoint() (my_slm.utils)                           → resume training
    ├─ load_latest_checkpoint() (my_slm.train)                    → curriculum warm-start
    ├─ load_model_and_tok() (my_slm.semantic_eval)                → evaluation suite
    └─ Transformer.generate()                                     → inference
@@ -178,12 +178,15 @@ first (see §5).
 
 ## 5. Backward compatibility
 
-- **Checkpoint formats**: `semantic_eval.load_model_and_tok()` and
-  `utils.load_model_safely()` accept three shapes — the current
-  `{"config": {...}, "model_state": state_dict}` format, a legacy variant
-  with an *empty* `config` dict (architecture inferred from tensor shapes,
-  with a printed warning), and a bare `state_dict` with no wrapper at all.
-  Keep all three paths working when touching checkpoint I/O.
+- **Checkpoint formats**: `semantic_eval.load_model_and_tok()` accepts three
+  shapes — the current `{"config": {...}, "model_state": state_dict}` format,
+  a legacy variant with an *empty* `config` dict (architecture inferred from
+  tensor shapes, with a printed warning), and a bare `state_dict` with no
+  wrapper at all. Keep all three paths working when touching checkpoint I/O.
+  `utils.load_checkpoint()` handles a different, directory-based format
+  (`config.json` + `model.safetensors`/`model.pt` inside a checkpoint dir,
+  as written by `save_checkpoint()`) — it does not read the wrapped
+  `*_stage.pt` files.
 - **`torch.load` safety**: every load site tries `weights_only=True` first.
   `train.load_latest_checkpoint._load_state` intentionally does **not**
   fall back to `weights_only=False` on failure — that fallback was closed
