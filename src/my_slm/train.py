@@ -4,23 +4,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from torch.utils.data import DataLoader, Dataset
-from sklearn.model_selection import train_test_split
-import pandas as pd
 
 
 def _save_or_close_fig(fig_path, train_losses, val_losses, label="Loss"):
-    plt.figure(figsize=(6, 4))
-    plt.plot(train_losses, label=f"Train {label}")
-    plt.plot(val_losses,   label=f"Val {label}")
-    plt.xlabel("Epoch"); plt.ylabel(label); plt.legend(); plt.tight_layout()
-    if fig_path:
-        Path(fig_path).parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(fig_path, dpi=100, bbox_inches="tight")
-        print(f"[Plot] Loss curve → {fig_path}")
-    plt.close()
+    """
+    Render the loss curve with the object-oriented Matplotlib API (Figure +
+    Agg canvas) instead of pyplot. This never touches pyplot's global/GUI
+    backend, so it can't crash headless runs (e.g. no Tk/display available)
+    and never disturbs a caller's own `%matplotlib inline` backend — this
+    function only ever calls savefig(), never show().
+    """
+    if not fig_path:
+        return
+    fig = Figure(figsize=(6, 4))
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
+    ax.plot(train_losses, label=f"Train {label}")
+    ax.plot(val_losses,   label=f"Val {label}")
+    ax.set_xlabel("Epoch"); ax.set_ylabel(label); ax.legend()
+    fig.tight_layout()
+    Path(fig_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(fig_path, dpi=100, bbox_inches="tight")
+    print(f"[Plot] Loss curve → {fig_path}")
 
 
 def get_cosine_schedule_with_warmup(optimizer, warmup_steps: int, total_steps: int):

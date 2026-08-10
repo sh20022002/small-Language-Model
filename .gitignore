@@ -33,6 +33,9 @@ Thumbs.db
 
 # Claude Code project files
 .claude/
+*.claude*
+Claude-Session
+Co-Authored-By
 
 # Patch / helper scripts (not part of the training pipeline)
 patch_notebook*.py
@@ -44,4 +47,3 @@ scrshots/
 # Old development notebooks (training entry point is kaggle_dual_gpu_finetune.ipynb)
 notebooks/
 *.egg-info/
-.claude/
