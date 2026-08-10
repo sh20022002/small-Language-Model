@@ -452,13 +452,13 @@ def train_across_datasets(
 
             # Save checkpoint with real config for reproducibility
             config = {
-                "vocab_size": model.token_emb.num_embeddings,
-                "dim": model.token_emb.embedding_dim,
-                "depth": model.depth,
-                "heads": getattr(model.blocks[0].attn, "heads", 8),
-                "kv_heads": getattr(model.blocks[0].attn, "kv_heads", 8),
-                "mlp_dim": getattr(model.blocks[0].ff, "gate", None).out_features if hasattr(model.blocks[0].ff, "gate") else 2048,
-                "window": model.max_seq_len,
+                "vocab_size": unwrapped.token_emb.num_embeddings,
+                "dim": unwrapped.token_emb.embedding_dim,
+                "depth": unwrapped.depth,
+                "heads": getattr(unwrapped.blocks[0].attn, "heads", 8),
+                "kv_heads": getattr(unwrapped.blocks[0].attn, "kv_heads", 8),
+                "mlp_dim": getattr(unwrapped.blocks[0].ff, "gate", None).out_features if hasattr(unwrapped.blocks[0].ff, "gate") else 2048,
+                "window": unwrapped.max_seq_len,
                 "tie_weights": True,  # This is the default in Transformer
             }
             torch.save({"config": config, "model_state": unwrapped.state_dict()}, ckpt_path)
